@@ -1,0 +1,63 @@
+import { Database } from 'bun:sqlite';
+import type { AddJobOptions, BatchOptions, FailedJob, Job, JobBatch, JobMap, JobStats, ListJobsOptions, PaginatedResult, PurgeOptions, WorkerOptions } from './types';
+import { JobWorker } from './worker';
+export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> {
+    readonly db: Database;
+    private readonly insertJobStmt;
+    private readonly insertDepStmt;
+    private readonly selectJobStmt;
+    private readonly selectPendingStmt;
+    private readonly markProcessingStmt;
+    private readonly markDoneStmt;
+    private readonly markFailedStmt;
+    private readonly updateProgressStmt;
+    private readonly selectStatsStmt;
+    private readonly countFailedStmt;
+    private readonly insertFailedJobStmt;
+    private readonly deleteJobStmt;
+    private readonly selectDependentsStmt;
+    private readonly countUnmetDepsStmt;
+    private readonly unblockJobStmt;
+    private readonly lastInsertRowIdStmt;
+    private readonly insertBatchStmt;
+    private readonly selectBatchStmt;
+    private readonly decrementBatchPendingStmt;
+    private readonly incrementBatchFailedStmt;
+    private readonly finishBatchStmt;
+    private readonly cancelBatchStmt;
+    private readonly cancelBatchJobsStmt;
+    constructor(dbPath: string);
+    add<K extends string & keyof TMap>(type: K, data: TMap[K], options?: AddJobOptions): number;
+    getJob(id: number): Job | null;
+    getStats(): JobStats;
+    getFailedJobs(options?: {
+        type?: string;
+        limit?: number;
+        offset?: number;
+    }): PaginatedResult<FailedJob>;
+    listJobs(options?: ListJobsOptions): PaginatedResult<Job>;
+    cancelJob(id: number): boolean;
+    forceRetryJob(id: number): boolean;
+    setJobHttpLog(id: number, requestLog: string, responseLog: string): void;
+    getJobTypes(): string[];
+    retryFailedJob(failedJobId: number): number;
+    purgeFailedJobs(olderThanMs: number): number;
+    purge(options: PurgeOptions): number;
+    pollAndClaim(type: string): Job | null;
+    markJobDone(id: number): void;
+    markJobDead(id: number, error: string): void;
+    markJobFailed(id: number, error: string): void;
+    updateProgress(id: number, progress: number): void;
+    createBatch(name: string, options?: BatchOptions): string;
+    addToBatch<K extends string & keyof TMap>(batchId: string, type: K, data: TMap[K], options?: AddJobOptions): number;
+    getBatch(batchId: string): JobBatch | null;
+    cancelBatch(batchId: string): void;
+    createWorker<K extends string & keyof TMap>(options: WorkerOptions<TMap[K]> & {
+        type: K;
+    }): JobWorker<TMap, K>;
+    private insertJob;
+    close(): void;
+    private unblockDependents;
+    private handleBatchJobComplete;
+}
+//# sourceMappingURL=queue.d.ts.map

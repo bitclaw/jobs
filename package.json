@@ -1,0 +1,67 @@
+{
+  "name": "@bitclaw/jobs",
+  "version": "1.0.0",
+  "description": "SQLite-backed background job queue using bun:sqlite",
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./queue": {
+      "types": "./dist/queue.d.ts",
+      "default": "./dist/queue.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "default": "./dist/worker.js"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "default": "./dist/schema.js"
+    },
+    "./rate-limiter": {
+      "types": "./dist/rate-limiter.d.ts",
+      "default": "./dist/rate-limiter.js"
+    },
+    "./cron": {
+      "types": "./dist/cron.d.ts",
+      "default": "./dist/cron.js"
+    },
+    "./scheduler": {
+      "types": "./dist/scheduler.d.ts",
+      "default": "./dist/scheduler.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check",
+    "lint:fix": "biome check --write",
+    "format": "biome format --write",
+    "knip": "knip",
+    "prepublishOnly": "npm run build && npm test",
+    "publish:dev": "npm run build && npm publish --tag dev --access public",
+    "publish:patch": "npm whoami && npm version patch && git push --follow-tags && npm publish --access public",
+    "publish:minor": "npm whoami && npm version minor && git push --follow-tags && npm publish --access public",
+    "publish:major": "npm whoami && npm version major && git push --follow-tags && npm publish --access public"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.15",
+    "knip": "^6.12.1",
+    "@types/bun": "^1.3.9",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  }
+}
