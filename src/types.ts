@@ -104,6 +104,20 @@ export type RateLimit = {
   windowMs: number;
 };
 
+export type MiddlewareFn<T = unknown> = (
+  job: Job<T>,
+  next: () => Promise<unknown>
+) => Promise<unknown>;
+
+export type JobGraphNode = {
+  readonly id: number;
+  readonly type: string;
+  readonly status: JobStatus;
+  readonly result: unknown | null;
+  readonly dependsOn: number[];
+  readonly dependents: number[];
+};
+
 export type WorkerOptions<T = unknown> = {
   type: string;
   handler: (job: Job<T>, ctx: JobContext) => Promise<unknown>;

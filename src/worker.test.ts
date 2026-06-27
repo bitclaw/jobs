@@ -379,4 +379,145 @@ describe('JobWorker', () => {
       expect(result).toEqual({ processed: 'compute', count: 42 });
     });
   });
+
+  describe('middleware integration', () => {
+    test('middleware wraps handler in order', async () => {
+      const order: string[] = [];
+
+      queue.use(async (_job, next) => {
+        order.push('before');
+        const r = await next();
+        order.push('after');
+        return r;
+      });
+
+      queue.add('test:work', { value: 'x' });
+      const worker = queue.createWorker({
+        type: 'test:work',
+        handler: async () => {
+          order.push('handler');
+        },
+        pollIntervalMs: 10
+      });
+
+      worker.start();
+      await sleep(100);
+      await worker.stop();
+
+      expect(order).toEqual(['before', 'handler', 'after']);
+    });
+
+    test('middleware can short-circuit handler', async () => {
+      let handlerCalled = false;
+
+      queue.use(async () => 'skipped');
+
+      queue.add('test:work', { value: 'x' });
+      const worker = queue.createWorker({
+        type: 'test:work',
+        handler: async () => {
+          handlerCalled = true;
+        },
+        pollIntervalMs: 10
+      });
+
+      worker.start();
+      await sleep(100);
+      await worker.stop();
+
+      expect(handlerCalled).toBe(false);
+    });
+
+    test('middleware error propagates to onError', async () => {
+      const onError = vi.fn();
+
+      queue.use(async () => {
+        throw new Error('middleware failure');
+      });
+
+      queue.add('test:work', { value: 'x' });
+      const worker = queue.createWorker({
+        type: 'test:work',
+        handler: async () => {},
+        onError,
+        pollIntervalMs: 10
+      });
+
+      worker.start();
+      await sleep(100);
+      await worker.stop();
+
+      expect(onError).toHaveBeenCalled();
+    });
+
+    test('multiple middlewares run in correct onion order', async () => {
+      const order: string[] = [];
+
+      queue.use(async (_job, next) => {
+        order.push('mw1-in');
+        await next();
+        order.push('mw1-out');
+      });
+      queue.use(async (_job, next) => {
+        order.push('mw2-in');
+        await next();
+        order.push('mw2-out');
+      });
+
+      queue.add('test:work', { value: 'x' });
+      const worker = queue.createWorker({
+        type: 'test:work',
+        handler: async () => {
+          order.push('handler');
+        },
+        pollIntervalMs: 10
+      });
+
+      worker.start();
+      await sleep(100);
+      await worker.stop();
+
+      expect(order).toEqual([
+        'mw1-in',
+        'mw2-in',
+        'handler',
+        'mw2-out',
+        'mw1-out'
+      ]);
+    });
+  });
+
+  describe('priority aging', () => {
+    test('aging boosts priority of pending jobs', async () => {
+      // Schedule far in future so job stays pending (can't be claimed)
+      // but aging SQL still matches it (checks created_at, not run_at)
+      queue.add(
+        'test:work',
+        { value: 'age-me' },
+        {
+          priority: 0,
+          runAt: new Date(Date.now() + 60_000)
+        }
+      );
+
+      const before = queue.listJobs({ status: 'pending', type: 'test:work' })
+        .items[0]!.priority;
+
+      const worker = queue.createWorker({
+        type: 'test:work',
+        handler: async () => {},
+        pollIntervalMs: 10,
+        aging: { boostPerMinute: 6000, maxBoost: 100 }
+      });
+
+      worker.start();
+      await sleep(150);
+      await worker.stop();
+
+      const after = queue.listJobs({ status: 'pending', type: 'test:work' })
+        .items[0]!.priority;
+
+      expect(after).toBeGreaterThan(before);
+    });
+  });
 });

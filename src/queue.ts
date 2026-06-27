@@ -14,10 +14,13 @@ import type {
   Job,
   JobBatch,
   JobBatchRow,
+  JobGraphNode,
   JobMap,
   JobRow,
   JobStats,
+  JobStatus,
   ListJobsOptions,
+  MiddlewareFn,
   PaginatedResult,
   PurgeOptions,
   StatsRow,
@@ -87,6 +90,7 @@ export class JobQueue<
   TMap extends JobMap = Record<string, unknown>
 > extends JobQueueEmitter {
   readonly db: Database;
+  readonly middlewares: MiddlewareFn[] = [];
 
   private readonly insertJobStmt;
   private readonly selectDedupedJobStmt;
@@ -453,9 +457,25 @@ export class JobQueue<
 
   markJobDone(id: number, result?: unknown): void {
     let doneJob: Job | null = null;
+    // Use container object so TypeScript tracks mutation across the closure
+    const wh: {
+      config: {
+        url: string;
+        method?: string;
+        headers?: Record<string, string>;
+      } | null;
+    } = { config: null };
+
     this.db.transaction(() => {
       const now = nowISO();
       const row = this.selectJobStmt.get({ $id: id }) as JobRow | null;
+      if (row?.webhook_config) {
+        try {
+          wh.config = JSON.parse(row.webhook_config) as typeof wh.config;
+        } catch {
+          // ignore malformed config
+        }
+      }
       this.markDoneStmt.run({
         $id: id,
         $now: now,
@@ -466,12 +486,21 @@ export class JobQueue<
       if (row?.batch_id) {
         this.handleBatchJobComplete(row.batch_id);
       }
-      // capture for post-tx emit
       const updatedRow = this.selectJobStmt.get({ $id: id }) as JobRow | null;
       if (updatedRow) doneJob = toJob(updatedRow);
     })();
 
     if (doneJob) this.emit('job:done', doneJob);
+
+    if (wh.config && doneJob) {
+      const cfg = wh.config;
+      const payload = doneJob;
+      void fetch(cfg.url, {
+        method: cfg.method ?? 'POST',
+        headers: { 'Content-Type': 'application/json', ...(cfg.headers ?? {}) },
+        body: JSON.stringify({ job: payload, result })
+      }).catch(() => {});
+    }
   }
 
   markJobDead(id: number, error: string): void {
@@ -821,6 +850,148 @@ export class JobQueue<
       )
       .run({ $now: nowISO() });
     return result.changes;
+  }
+
+  use(fn: MiddlewareFn): void {
+    this.middlewares.push(fn);
+  }
+
+  getJobGraph(rootId: number): JobGraphNode[] {
+    const relatedRows = this.db
+      .query(
+        `WITH RECURSIVE
+          ancestors(id) AS (
+            SELECT depends_on_id FROM job_dependencies WHERE job_id = $root
+            UNION
+            SELECT jd.depends_on_id FROM job_dependencies jd JOIN ancestors a ON jd.job_id = a.id
+          ),
+          descendants(id) AS (
+            SELECT job_id FROM job_dependencies WHERE depends_on_id = $root
+            UNION
+            SELECT jd.job_id FROM job_dependencies jd JOIN descendants d ON jd.depends_on_id = d.id
+          )
+        SELECT * FROM jobs
+        WHERE id IN (SELECT id FROM ancestors UNION SELECT $root UNION SELECT id FROM descendants)`
+      )
+      .all({ $root: rootId }) as JobRow[];
+
+    if (relatedRows.length === 0) return [];
+
+    const ids = relatedRows.map(r => r.id);
+    const namedParams: Record<string, number> = {};
+    for (let i = 0; i < ids.length; i++) namedParams[`$id${i}`] = ids[i]!;
+    const ph = ids.map((_, i) => `$id${i}`).join(',');
+    const edges = this.db
+      .query(
+        `SELECT job_id, depends_on_id FROM job_dependencies
+         WHERE job_id IN (${ph}) OR depends_on_id IN (${ph})`
+      )
+      .all(namedParams) as Array<{
+      job_id: number;
+      depends_on_id: number;
+    }>;
+
+    return relatedRows.map(row => ({
+      id: row.id,
+      type: row.type,
+      status: row.status as JobStatus,
+      result: row.result ? (JSON.parse(row.result) as unknown) : null,
+      dependsOn: edges
+        .filter(e => e.job_id === row.id)
+        .map(e => e.depends_on_id),
+      dependents: edges
+        .filter(e => e.depends_on_id === row.id)
+        .map(e => e.job_id)
+    }));
+  }
+
+  mountAdminHandler(prefix = ''): (req: Request) => Promise<Response> {
+    const base = prefix.replace(/\/$/, '');
+    return async (req: Request): Promise<Response> => {
+      const url = new URL(req.url);
+      const path = url.pathname.slice(base.length).replace(/^\//, '');
+      const parts = path.split('/').filter(Boolean);
+      const method = req.method.toUpperCase();
+
+      try {
+        if (method === 'GET' && parts[0] === 'stats' && parts.length === 1) {
+          return Response.json(this.getStats());
+        }
+
+        if (method === 'GET' && parts[0] === 'jobs' && parts[1] === 'types') {
+          return Response.json(this.getJobTypes());
+        }
+
+        if (method === 'GET' && parts[0] === 'jobs' && parts.length === 1) {
+          const status = url.searchParams.get('status') as JobStatus | null;
+          const type = url.searchParams.get('type') ?? undefined;
+          const limit = Number(url.searchParams.get('limit') ?? 50);
+          const offset = Number(url.searchParams.get('offset') ?? 0);
+          return Response.json(
+            this.listJobs({ status: status ?? undefined, type, limit, offset })
+          );
+        }
+
+        if (method === 'GET' && parts[0] === 'jobs' && parts.length === 2) {
+          const id = Number(parts[1]);
+          const job = this.getJob(id);
+          if (!job)
+            return Response.json({ error: 'Not found' }, { status: 404 });
+          return Response.json(job);
+        }
+
+        if (method === 'GET' && parts[0] === 'jobs' && parts[2] === 'graph') {
+          return Response.json(this.getJobGraph(Number(parts[1])));
+        }
+
+        if (method === 'POST' && parts[0] === 'jobs' && parts[2] === 'cancel') {
+          return Response.json({ ok: this.cancelJob(Number(parts[1])) });
+        }
+
+        if (
+          method === 'POST' &&
+          parts[0] === 'jobs' &&
+          parts[2] === 'force-retry'
+        ) {
+          return Response.json({ ok: this.forceRetryJob(Number(parts[1])) });
+        }
+
+        if (method === 'GET' && parts[0] === 'failed' && parts.length === 1) {
+          const type = url.searchParams.get('type') ?? undefined;
+          const limit = Number(url.searchParams.get('limit') ?? 50);
+          const offset = Number(url.searchParams.get('offset') ?? 0);
+          return Response.json(this.getFailedJobs({ type, limit, offset }));
+        }
+
+        if (
+          method === 'POST' &&
+          parts[0] === 'failed' &&
+          parts[1] === 'retry-by-type'
+        ) {
+          const body = (await req.json()) as { type?: string };
+          if (!body.type)
+            return Response.json({ error: 'type required' }, { status: 400 });
+          return Response.json({
+            count: this.retryFailedJobsByType(body.type)
+          });
+        }
+
+        if (
+          method === 'POST' &&
+          parts[0] === 'failed' &&
+          parts[2] === 'retry'
+        ) {
+          return Response.json({ id: this.retryFailedJob(Number(parts[1])) });
+        }
+
+        return Response.json({ error: 'Not found' }, { status: 404 });
+      } catch (err) {
+        return Response.json(
+          { error: err instanceof Error ? err.message : 'Internal error' },
+          { status: 500 }
+        );
+      }
+    };
   }
 
   close(): void {

@@ -2,8 +2,15 @@
 // JobWorker — setTimeout-based poll loop with graceful shutdown
 import type { JobQueue } from './queue';
 import { SlidingWindowRateLimiter } from './rate-limiter';
-import type { Job, JobContext, JobMap, WorkerOptions } from './types';
+import type {
+  Job,
+  JobContext,
+  JobMap,
+  MiddlewareFn,
+  WorkerOptions
+} from './types';
 import { NonRetryableError } from './types';
+import { nowISO } from './utils';
 
 export class JobWorker<
   TMap extends JobMap = Record<string, unknown>,
@@ -110,6 +117,33 @@ export class JobWorker<
       void this.runJob(job as Job<TMap[K]>);
     }
 
+    // Apply priority aging if configured
+    if (this.options.aging) {
+      const { boostPerMinute, maxBoost } = this.options.aging;
+      const pollIntervalMs = this.options.pollIntervalMs ?? 1000;
+      const boostPerTick = (boostPerMinute * pollIntervalMs) / 60_000;
+      if (boostPerTick > 0) {
+        const cutoff = new Date(Date.now() - pollIntervalMs).toISOString();
+        this.queue.db.run(
+          `UPDATE jobs
+           SET priority = MIN(priority + ?, ?),
+               updated_at = ?
+           WHERE status = 'pending'
+             AND type = ?
+             AND created_at < ?
+             AND priority < ?`,
+          [
+            boostPerTick,
+            maxBoost,
+            nowISO(),
+            this.options.type,
+            cutoff,
+            maxBoost
+          ]
+        );
+      }
+    }
+
     this.scheduleNext();
   }
 
@@ -125,12 +159,26 @@ export class JobWorker<
         signal: this.abortController!.signal
       };
 
-      const handlerPromise = this.options.handler(job as Job<TMap[K]>, ctx);
+      const handler = this.options.handler;
+      const middlewares = this.queue.middlewares as MiddlewareFn<TMap[K]>[];
+      const chain: Array<
+        (j: Job<TMap[K]>, next: () => Promise<unknown>) => Promise<unknown>
+      > = [...middlewares, (j: Job<TMap[K]>) => handler(j, ctx)];
+      const execute = (): Promise<unknown> => {
+        let i = 0;
+        const run = (): Promise<unknown> => {
+          const mw = chain[i++];
+          if (!mw) return Promise.resolve(undefined);
+          return mw(job as Job<TMap[K]>, run);
+        };
+        return run();
+      };
+
       let handlerResult: unknown;
       if (this.options.timeoutMs) {
         const timeoutMs = this.options.timeoutMs;
         handlerResult = await Promise.race([
-          handlerPromise,
+          execute(),
           new Promise<never>((_, reject) =>
             setTimeout(
               () => reject(new Error(`Job timed out after ${timeoutMs}ms`)),
@@ -139,7 +187,7 @@ export class JobWorker<
           )
         ]);
       } else {
-        handlerResult = await handlerPromise;
+        handlerResult = await execute();
       }
 
       this.queue.markJobDone(job.id, handlerResult);
