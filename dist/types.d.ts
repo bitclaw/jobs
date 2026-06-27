@@ -241,4 +241,21 @@ export type AddScheduleOptions = {
     overlap?: boolean;
     maxRetries?: number;
 };
+export type WorkflowExecutionStatus = 'running' | 'completed' | 'compensating' | 'failed';
+export type WorkflowExecution = {
+    readonly id: string;
+    readonly name: string;
+    readonly status: WorkflowExecutionStatus;
+    readonly createdAt: string;
+    readonly completedAt: string | null;
+};
+export type WorkflowRunResult<TStepNames extends string> = {
+    instanceId: string;
+    jobIds: Record<TStepNames, number>;
+};
+export type WorkflowReconcileResult = {
+    completed: number;
+    compensated: number;
+    failed: number;
+};
 //# sourceMappingURL=types.d.ts.map

@@ -1,6 +1,6 @@
 {
   "name": "@bitclaw/jobs",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "SQLite-backed background job queue using bun:sqlite",
   "files": [
     "dist",
@@ -42,6 +42,10 @@
     "./workflow": {
       "types": "./dist/workflow.d.ts",
       "default": "./dist/workflow.js"
+    },
+    "./otel": {
+      "types": "./dist/otel.d.ts",
+      "default": "./dist/otel.js"
     }
   },
   "scripts": {

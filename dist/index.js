@@ -8,3 +8,4 @@ export { Scheduler } from './scheduler';
 export { applyPragmas, initializeSchema } from './schema';
 export { NonRetryableError } from './types';
 export { JobWorker } from './worker';
+export { WorkflowBuilder, WorkflowEngine } from './workflow';
