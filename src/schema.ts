@@ -20,8 +20,16 @@ CREATE TABLE IF NOT EXISTS jobs (
   error TEXT,
   request_log TEXT,
   response_log TEXT,
-  batch_id TEXT REFERENCES job_batches(id)
+  batch_id TEXT REFERENCES job_batches(id),
+  unique_key TEXT
 )`;
+
+// State-aware dedup: same (type, unique_key) cannot be both pending/processing at once.
+// Once the job completes, the same key can be re-enqueued.
+const JOBS_UNIQUE_KEY_INDEX = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_unique_key
+  ON jobs (type, unique_key)
+  WHERE unique_key IS NOT NULL AND status IN ('pending', 'processing')`;
 
 const JOBS_POLL_INDEX = `
 CREATE INDEX IF NOT EXISTS idx_jobs_poll
@@ -115,4 +123,13 @@ export function initializeSchema(db: Database): void {
   db.run(FAILED_JOBS_TABLE);
   db.run(SCHEDULES_TABLE);
   db.run(SCHEDULES_NEXT_RUN_INDEX);
+
+  // Migration: add unique_key to existing DBs that were created before v1.2.0
+  const cols = db
+    .prepare("PRAGMA table_info(jobs)")
+    .all() as Array<{ name: string }>;
+  if (!cols.some(c => c.name === 'unique_key')) {
+    db.run('ALTER TABLE jobs ADD COLUMN unique_key TEXT');
+  }
+  db.run(JOBS_UNIQUE_KEY_INDEX);
 }

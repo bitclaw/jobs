@@ -46,6 +46,12 @@ export type AddJobOptions = {
     runAt?: Date;
     maxRetries?: number;
     dependsOn?: number[];
+    /**
+     * Deduplication key scoped to job type. If a job with the same (type, uniqueKey)
+     * is already pending or processing, the new enqueue is silently ignored and the
+     * existing job id is returned. Once the job completes, the same key can be re-used.
+     */
+    uniqueKey?: string;
 };
 export type JobContext = {
     reportProgress: (percent: number) => void;
@@ -106,6 +112,7 @@ export type JobRow = {
     batch_id: string | null;
     request_log: string | null;
     response_log: string | null;
+    unique_key: string | null;
 };
 export type FailedJobRow = {
     id: number;

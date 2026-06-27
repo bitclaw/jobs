@@ -59,6 +59,7 @@ function toFailedJob(row) {
 export class JobQueue {
     db;
     insertJobStmt;
+    selectDedupedJobStmt;
     insertDepStmt;
     selectJobStmt;
     selectPendingStmt;
@@ -88,8 +89,14 @@ export class JobQueue {
         applyPragmas(this.db);
         initializeSchema(this.db);
         this.insertJobStmt = this.db.query(`
-      INSERT INTO jobs (type, data, status, priority, max_retries, run_at, batch_id)
-      VALUES ($type, $data, $status, $priority, $maxRetries, $runAt, $batchId)
+      INSERT OR IGNORE INTO jobs (type, data, status, priority, max_retries, run_at, batch_id, unique_key)
+      VALUES ($type, $data, $status, $priority, $maxRetries, $runAt, $batchId, $uniqueKey)
+    `);
+        this.selectDedupedJobStmt = this.db.query(`
+      SELECT id FROM jobs
+      WHERE type = $type AND unique_key = $uniqueKey
+        AND status IN ('pending', 'processing')
+      LIMIT 1
     `);
         this.insertDepStmt = this.db.query(`
       INSERT INTO job_dependencies (job_id, depends_on_id) VALUES ($jobId, $depsOnId)
@@ -279,7 +286,8 @@ export class JobQueue {
             $priority: 0,
             $maxRetries: row.max_retries,
             $runAt: now,
-            $batchId: null
+            $batchId: null,
+            $uniqueKey: null
         });
         const newJobId = this.lastInsertRowIdStmt.get();
         this.db
@@ -430,15 +438,25 @@ export class JobQueue {
         const runAt = options?.runAt ? options.runAt.toISOString() : now;
         const hasDeps = options?.dependsOn && options.dependsOn.length > 0;
         const status = hasDeps ? 'blocked' : 'pending';
-        this.insertJobStmt.run({
+        const result = this.insertJobStmt.run({
             $type: type,
             $data: JSON.stringify(data),
             $status: status,
             $priority: options?.priority ?? 0,
             $maxRetries: options?.maxRetries ?? 3,
             $runAt: runAt,
-            $batchId: batchId
+            $batchId: batchId,
+            $uniqueKey: options?.uniqueKey ?? null
         });
+        // INSERT OR IGNORE: if a pending/processing job with same (type, uniqueKey)
+        // already exists, the insert is a no-op. Return the existing job id.
+        if (result.changes === 0 && options?.uniqueKey) {
+            const existing = this.selectDedupedJobStmt.get({
+                $type: type,
+                $uniqueKey: options.uniqueKey
+            });
+            return existing?.id ?? 0;
+        }
         const jobId = this.lastInsertRowIdStmt.get();
         if (hasDeps) {
             for (const depId of options.dependsOn) {
@@ -503,7 +521,8 @@ export class JobQueue {
                 $priority: 0,
                 $maxRetries: 3,
                 $runAt: now,
-                $batchId: null
+                $batchId: null,
+                $uniqueKey: null
             });
         }
         // Enqueue "finally" callback job regardless of failures
@@ -515,7 +534,8 @@ export class JobQueue {
                 $priority: 0,
                 $maxRetries: 3,
                 $runAt: now,
-                $batchId: null
+                $batchId: null,
+                $uniqueKey: null
             });
         }
     }

@@ -574,4 +574,80 @@ describe('JobQueue', () => {
       expect(count).toBe(0);
     });
   });
+
+  describe('uniqueKey deduplication', () => {
+    test('second enqueue with same (type, uniqueKey) while pending is ignored', () => {
+      const id1 = queue.add(
+        'email:send',
+        { to: 'a@test.com', subject: 'Hi' },
+        { uniqueKey: 'welcome:user-1' }
+      );
+      const id2 = queue.add(
+        'email:send',
+        { to: 'a@test.com', subject: 'Hi' },
+        { uniqueKey: 'welcome:user-1' }
+      );
+      expect(id1).toBeGreaterThan(0);
+      expect(id2).toBe(id1);
+      expect(queue.getStats().pending).toBe(1);
+    });
+
+    test('same uniqueKey on different type does not conflict', () => {
+      const id1 = queue.add(
+        'email:send',
+        { to: 'a@test.com', subject: 'Hi' },
+        { uniqueKey: 'user-1' }
+      );
+      const id2 = queue.add(
+        'deploy:provision',
+        { serverId: 'srv-1' },
+        { uniqueKey: 'user-1' }
+      );
+      expect(id1).toBeGreaterThan(0);
+      expect(id2).toBeGreaterThan(0);
+      expect(id1).not.toBe(id2);
+      expect(queue.getStats().pending).toBe(2);
+    });
+
+    test('same uniqueKey can be re-enqueued after job completes', () => {
+      const id1 = queue.add(
+        'email:send',
+        { to: 'a@test.com', subject: 'Hi' },
+        { uniqueKey: 'welcome:user-1' }
+      );
+      queue.markJobDone(id1);
+
+      const id2 = queue.add(
+        'email:send',
+        { to: 'a@test.com', subject: 'Hi again' },
+        { uniqueKey: 'welcome:user-1' }
+      );
+      expect(id2).toBeGreaterThan(id1);
+      expect(queue.getStats().pending).toBe(1);
+    });
+
+    test('enqueue without uniqueKey allows unlimited duplicates', () => {
+      const id1 = queue.add('email:send', { to: 'a@test.com', subject: 'Hi' });
+      const id2 = queue.add('email:send', { to: 'a@test.com', subject: 'Hi' });
+      expect(id1).not.toBe(id2);
+      expect(queue.getStats().pending).toBe(2);
+    });
+
+    test('second enqueue returns existing id while job is processing', () => {
+      const id1 = queue.add(
+        'email:send',
+        { to: 'a@test.com', subject: 'Hi' },
+        { uniqueKey: 'welcome:user-2' }
+      );
+      // Claim the job (moves to processing)
+      queue.pollAndClaim('email:send');
+
+      const id2 = queue.add(
+        'email:send',
+        { to: 'a@test.com', subject: 'Hi' },
+        { uniqueKey: 'welcome:user-2' }
+      );
+      expect(id2).toBe(id1);
+    });
+  });
 });

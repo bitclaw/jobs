@@ -4,6 +4,7 @@ import { JobWorker } from './worker';
 export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> {
     readonly db: Database;
     private readonly insertJobStmt;
+    private readonly selectDedupedJobStmt;
     private readonly insertDepStmt;
     private readonly selectJobStmt;
     private readonly selectPendingStmt;
