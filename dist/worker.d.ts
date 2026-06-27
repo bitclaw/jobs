@@ -7,15 +7,20 @@ export declare class JobWorker<TMap extends JobMap = Record<string, unknown>, K 
     private abortController;
     private timer;
     private running;
-    private processing;
+    private paused;
+    private activeCount;
     private stopResolve;
     constructor(queue: JobQueue<TMap>, options: WorkerOptions<TMap[K]> & {
         type: K;
     });
     get isRunning(): boolean;
+    get isPaused(): boolean;
     start(): void;
     stop(): Promise<void>;
+    pause(): void;
+    resume(): void;
     private scheduleNext;
     private poll;
+    private runJob;
 }
 //# sourceMappingURL=worker.d.ts.map

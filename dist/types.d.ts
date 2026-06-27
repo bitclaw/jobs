@@ -27,6 +27,10 @@ export type Job<T = unknown> = {
     readonly batchId: string | null;
     readonly requestLog: string | null;
     readonly responseLog: string | null;
+    readonly uniqueKey: string | null;
+    readonly claimedUntil: string | null;
+    readonly result: unknown | null;
+    readonly expireAt: string | null;
 };
 export type FailedJob = {
     readonly id: number;
@@ -41,6 +45,11 @@ export type FailedJob = {
     readonly requestLog: string | null;
     readonly responseLog: string | null;
 };
+export type BackoffConfig = {
+    type: 'exponential' | 'fixed' | 'jitter' | 'fibonacci';
+    /** Base delay in ms. Exponential: delayMs * 2^retryCount. Fixed: always delayMs. Max 1h. */
+    delayMs: number;
+};
 export type AddJobOptions = {
     priority?: number;
     runAt?: Date;
@@ -52,10 +61,23 @@ export type AddJobOptions = {
      * existing job id is returned. Once the job completes, the same key can be re-used.
      */
     uniqueKey?: string;
+    /**
+     * Backoff strategy for retries. Exponential: delayMs * 2^retryCount, capped at 1h.
+     * Fixed: always delayMs between retries. Default: retry immediately.
+     */
+    backoff?: BackoffConfig;
+    dedup?: 'ignore' | 'replace';
+    expireAt?: Date;
+    onComplete?: {
+        url: string;
+        method?: string;
+        headers?: Record<string, string>;
+    };
 };
 export type JobContext = {
     reportProgress: (percent: number) => void;
     signal: AbortSignal;
+    renewLease(): void;
 };
 export type RateLimit = {
     count: number;
@@ -63,12 +85,20 @@ export type RateLimit = {
 };
 export type WorkerOptions<T = unknown> = {
     type: string;
-    handler: (job: Job<T>, ctx: JobContext) => Promise<void>;
+    handler: (job: Job<T>, ctx: JobContext) => Promise<unknown>;
     pollIntervalMs?: number;
     maxRate?: RateLimit;
     onError?: (job: Job<T>, error: unknown) => void;
     /** Hard wall-clock limit per job execution in ms. Job is marked failed on timeout. */
     timeoutMs?: number;
+    /** Max concurrent jobs this worker runs simultaneously. Default: 1. */
+    concurrency?: number;
+    leaseMs?: number;
+    retryIf?: (error: unknown, job: Job<T>) => boolean;
+    aging?: {
+        boostPerMinute: number;
+        maxBoost: number;
+    };
 };
 export type JobStats = {
     pending: number;
@@ -113,6 +143,11 @@ export type JobRow = {
     request_log: string | null;
     response_log: string | null;
     unique_key: string | null;
+    backoff_config: string | null;
+    claimed_until: string | null;
+    result: string | null;
+    expire_at: string | null;
+    webhook_config: string | null;
 };
 export type FailedJobRow = {
     id: number;

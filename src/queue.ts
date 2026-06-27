@@ -3,6 +3,7 @@
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { JobQueueEmitter } from './events';
 import { applyPragmas, initializeSchema } from './schema';
 import type {
   AddJobOptions,
@@ -43,7 +44,11 @@ function toJob<T = unknown>(row: JobRow): Job<T> {
     error: row.error,
     batchId: row.batch_id,
     requestLog: row.request_log,
-    responseLog: row.response_log
+    responseLog: row.response_log,
+    uniqueKey: row.unique_key,
+    claimedUntil: row.claimed_until,
+    result: row.result ? JSON.parse(row.result) : null,
+    expireAt: row.expire_at
   };
 }
 
@@ -78,7 +83,9 @@ function toFailedJob(row: FailedJobRow): FailedJob {
   };
 }
 
-export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
+export class JobQueue<
+  TMap extends JobMap = Record<string, unknown>
+> extends JobQueueEmitter {
   readonly db: Database;
 
   private readonly insertJobStmt;
@@ -99,6 +106,8 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
   private readonly unblockJobStmt;
   private readonly lastInsertRowIdStmt;
 
+  private readonly renewLeaseStmt;
+
   // Batch statements
   private readonly insertBatchStmt;
   private readonly selectBatchStmt;
@@ -109,14 +118,15 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
   private readonly cancelBatchJobsStmt;
 
   constructor(dbPath: string) {
+    super();
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath, { create: true });
     applyPragmas(this.db);
     initializeSchema(this.db);
 
     this.insertJobStmt = this.db.query(`
-      INSERT OR IGNORE INTO jobs (type, data, status, priority, max_retries, run_at, batch_id, unique_key, backoff_config)
-      VALUES ($type, $data, $status, $priority, $maxRetries, $runAt, $batchId, $uniqueKey, $backoffConfig)
+      INSERT OR IGNORE INTO jobs (type, data, status, priority, max_retries, run_at, batch_id, unique_key, backoff_config, expire_at, webhook_config)
+      VALUES ($type, $data, $status, $priority, $maxRetries, $runAt, $batchId, $uniqueKey, $backoffConfig, $expireAt, $webhookConfig)
     `);
     this.selectDedupedJobStmt = this.db.query(`
       SELECT id FROM jobs
@@ -130,16 +140,21 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
     this.selectJobStmt = this.db.query('SELECT * FROM jobs WHERE id = $id');
     this.selectPendingStmt = this.db.query(`
       SELECT * FROM jobs
-      WHERE status = 'pending' AND type = $type AND run_at <= $now
+      WHERE type = $type AND run_at <= $now
+        AND (expire_at IS NULL OR expire_at > $now)
+        AND (
+          (status = 'pending')
+          OR (status = 'processing' AND claimed_until IS NOT NULL AND claimed_until < $now)
+        )
       ORDER BY priority DESC, created_at ASC
       LIMIT 1
     `);
     this.markProcessingStmt = this.db.query(`
-      UPDATE jobs SET status = 'processing', started_at = $now, updated_at = $now
+      UPDATE jobs SET status = 'processing', started_at = $now, updated_at = $now, claimed_until = $claimedUntil
       WHERE id = $id
     `);
     this.markDoneStmt = this.db.query(`
-      UPDATE jobs SET status = 'done', completed_at = $now, updated_at = $now, progress = 100
+      UPDATE jobs SET status = 'done', completed_at = $now, updated_at = $now, progress = 100, result = $result
       WHERE id = $id
     `);
     this.markFailedStmt = this.db.query(`
@@ -180,6 +195,10 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
     this.lastInsertRowIdStmt = this.db.query(
       'SELECT last_insert_rowid() as id'
     );
+    this.renewLeaseStmt = this.db.query(`
+      UPDATE jobs SET claimed_until = $claimedUntil, updated_at = $now
+      WHERE id = $id AND status = 'processing'
+    `);
 
     // Batch statements
     this.insertBatchStmt = this.db.query(`
@@ -372,7 +391,9 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
       $runAt: now,
       $batchId: null,
       $uniqueKey: null,
-      $backoffConfig: null
+      $backoffConfig: null,
+      $expireAt: null,
+      $webhookConfig: null
     });
 
     const newJobId = this.lastInsertRowIdStmt.get() as { id: number };
@@ -400,15 +421,20 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
     return result.changes;
   }
 
-  pollAndClaim(type: string): Job | null {
+  pollAndClaim(type: string, leaseMs = 300_000): Job | null {
     const now = nowISO();
+    const claimedUntil = new Date(Date.now() + leaseMs).toISOString();
     const claimTx = this.db.transaction(() => {
       const row = this.selectPendingStmt.get({
         $type: type,
         $now: now
       }) as JobRow | null;
       if (!row) return null;
-      this.markProcessingStmt.run({ $id: row.id, $now: now });
+      this.markProcessingStmt.run({
+        $id: row.id,
+        $now: now,
+        $claimedUntil: claimedUntil
+      });
       return row;
     });
 
@@ -416,23 +442,45 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
     return row ? toJob(row) : null;
   }
 
-  markJobDone(id: number): void {
+  renewLease(id: number, leaseMs: number): void {
+    const claimedUntil = new Date(Date.now() + leaseMs).toISOString();
+    this.renewLeaseStmt.run({
+      $id: id,
+      $claimedUntil: claimedUntil,
+      $now: nowISO()
+    });
+  }
+
+  markJobDone(id: number, result?: unknown): void {
+    let doneJob: Job | null = null;
     this.db.transaction(() => {
       const now = nowISO();
       const row = this.selectJobStmt.get({ $id: id }) as JobRow | null;
-      this.markDoneStmt.run({ $id: id, $now: now });
+      this.markDoneStmt.run({
+        $id: id,
+        $now: now,
+        $result: result !== undefined ? JSON.stringify(result) : null
+      });
       this.unblockDependents(id);
 
       if (row?.batch_id) {
         this.handleBatchJobComplete(row.batch_id);
       }
+      // capture for post-tx emit
+      const updatedRow = this.selectJobStmt.get({ $id: id }) as JobRow | null;
+      if (updatedRow) doneJob = toJob(updatedRow);
     })();
+
+    if (doneJob) this.emit('job:done', doneJob);
   }
 
   markJobDead(id: number, error: string): void {
+    let deadJob: Job | null = null;
     this.db.transaction(() => {
       const row = this.selectJobStmt.get({ $id: id }) as JobRow | null;
       if (!row) return;
+      // capture before delete
+      deadJob = toJob(row);
 
       this.insertFailedJobStmt.run({
         $originalJobId: row.id,
@@ -455,9 +503,12 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
         this.handleBatchJobComplete(row.batch_id);
       }
     })();
+
+    if (deadJob) this.emit('job:dead', deadJob, error);
   }
 
   markJobFailed(id: number, error: string): void {
+    let failedJob: Job | null = null;
     this.db.transaction(() => {
       const now = nowISO();
       const row = this.selectJobStmt.get({ $id: id }) as JobRow | null;
@@ -491,10 +542,29 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
           : null;
         let retryRunAt = now;
         if (backoff) {
-          const delayMs =
-            backoff.type === 'exponential'
-              ? Math.min(backoff.delayMs * 2 ** row.retry_count, 3_600_000)
-              : backoff.delayMs;
+          let delayMs: number;
+          switch (backoff.type) {
+            case 'exponential':
+              delayMs = Math.min(
+                backoff.delayMs * 2 ** row.retry_count,
+                3_600_000
+              );
+              break;
+            case 'jitter':
+              delayMs = Math.min(
+                backoff.delayMs * 2 ** row.retry_count * (0.5 + Math.random()),
+                3_600_000
+              );
+              break;
+            case 'fibonacci':
+              delayMs = Math.min(
+                backoff.delayMs * this.fib(row.retry_count),
+                3_600_000
+              );
+              break;
+            default: // 'fixed'
+              delayMs = backoff.delayMs;
+          }
           retryRunAt = new Date(Date.now() + delayMs).toISOString();
         }
         this.markFailedStmt.run({
@@ -503,8 +573,23 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
           $runAt: retryRunAt,
           $now: now
         });
+        // capture updated job for post-tx emit
+        const updatedRow = this.selectJobStmt.get({ $id: id }) as JobRow | null;
+        if (updatedRow) failedJob = toJob(updatedRow);
       }
     })();
+
+    if (failedJob) this.emit('job:failed', failedJob, error);
+  }
+
+  private fib(n: number): number {
+    if (n <= 1) return 1;
+    let a = 1,
+      b = 1;
+    for (let i = 2; i <= n; i++) {
+      [a, b] = [b, a + b];
+    }
+    return b;
   }
 
   updateProgress(id: number, progress: number): void {
@@ -513,6 +598,8 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
       $progress: progress,
       $now: nowISO()
     });
+    const row = this.selectJobStmt.get({ $id: id }) as JobRow | null;
+    if (row) this.emit('job:progress', toJob(row), progress);
   }
 
   // --- Batch API ---
@@ -574,6 +661,31 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
     const runAt = options?.runAt ? options.runAt.toISOString() : now;
     const hasDeps = options?.dependsOn && options.dependsOn.length > 0;
     const status = hasDeps ? 'blocked' : 'pending';
+    const expireAt = options?.expireAt ? options.expireAt.toISOString() : null;
+    const webhookConfig = options?.onComplete
+      ? JSON.stringify(options.onComplete)
+      : null;
+
+    // dedup='replace': update existing pending job's data + run_at
+    if (options?.dedup === 'replace' && options.uniqueKey) {
+      const existing = this.selectDedupedJobStmt.get({
+        $type: type,
+        $uniqueKey: options.uniqueKey
+      }) as { id: number } | null;
+      if (existing) {
+        this.db
+          .query(
+            'UPDATE jobs SET data = $data, run_at = $runAt, updated_at = $now WHERE id = $id'
+          )
+          .run({
+            $id: existing.id,
+            $data: JSON.stringify(data),
+            $runAt: runAt,
+            $now: now
+          });
+        return existing.id;
+      }
+    }
 
     const result = this.insertJobStmt.run({
       $type: type,
@@ -584,7 +696,9 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
       $runAt: runAt,
       $batchId: batchId,
       $uniqueKey: options?.uniqueKey ?? null,
-      $backoffConfig: options?.backoff ? JSON.stringify(options.backoff) : null
+      $backoffConfig: options?.backoff ? JSON.stringify(options.backoff) : null,
+      $expireAt: expireAt,
+      $webhookConfig: webhookConfig
     });
 
     // INSERT OR IGNORE: if a pending/processing job with same (type, uniqueKey)
@@ -632,7 +746,9 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
          WHERE status = 'processing' AND updated_at < $cutoff`
       )
       .run({ $now: nowISO(), $cutoff: cutoff });
-    return result.changes;
+    const count = result.changes;
+    if (count > 0) this.emit('job:stale', count);
+    return count;
   }
 
   /**
@@ -649,6 +765,62 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
       )
       .get({ $type: type, $uniqueKey: uniqueKey }) as JobRow | null;
     return row ? toJob(row) : null;
+  }
+
+  getJobResult<T>(id: number): T | null {
+    const row = this.selectJobStmt.get({ $id: id }) as JobRow | null;
+    if (!row?.result) return null;
+    return JSON.parse(row.result) as T;
+  }
+
+  cancelByUniqueKey(type: string, uniqueKey: string): boolean {
+    const result = this.db
+      .query(
+        "UPDATE jobs SET status = 'cancelled', updated_at = $now WHERE type = $type AND unique_key = $uniqueKey AND status IN ('pending', 'blocked')"
+      )
+      .run({ $type: type, $uniqueKey: uniqueKey, $now: nowISO() });
+    return result.changes > 0;
+  }
+
+  retryFailedJobsByType(type: string): number {
+    const rows = this.db
+      .query('SELECT * FROM failed_jobs WHERE type = $type')
+      .all({ $type: type }) as FailedJobRow[];
+
+    if (rows.length === 0) return 0;
+
+    const now = nowISO();
+    this.db.transaction(() => {
+      for (const row of rows) {
+        this.insertJobStmt.run({
+          $type: row.type,
+          $data: row.data,
+          $status: 'pending',
+          $priority: 0,
+          $maxRetries: row.max_retries,
+          $runAt: now,
+          $batchId: null,
+          $uniqueKey: null,
+          $backoffConfig: null,
+          $expireAt: null,
+          $webhookConfig: null
+        });
+        this.db
+          .query('DELETE FROM failed_jobs WHERE id = $id')
+          .run({ $id: row.id });
+      }
+    })();
+
+    return rows.length;
+  }
+
+  purgeExpiredJobs(): number {
+    const result = this.db
+      .query(
+        "DELETE FROM jobs WHERE expire_at IS NOT NULL AND expire_at <= $now AND status = 'pending'"
+      )
+      .run({ $now: nowISO() });
+    return result.changes;
   }
 
   close(): void {
@@ -695,36 +867,52 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
       ? (JSON.parse(batch.options) as BatchOptions)
       : null;
 
-    if (!options) return;
+    if (options) {
+      // Enqueue "then" callback job only if zero failures
+      if (batch.failed_jobs === 0 && options.thenType) {
+        this.insertJobStmt.run({
+          $type: options.thenType,
+          $data: JSON.stringify(options.thenData ?? {}),
+          $status: 'pending',
+          $priority: 0,
+          $maxRetries: 3,
+          $runAt: now,
+          $batchId: null,
+          $uniqueKey: null,
+          $backoffConfig: null,
+          $expireAt: null,
+          $webhookConfig: null
+        });
+      }
 
-    // Enqueue "then" callback job only if zero failures
-    if (batch.failed_jobs === 0 && options.thenType) {
-      this.insertJobStmt.run({
-        $type: options.thenType,
-        $data: JSON.stringify(options.thenData ?? {}),
-        $status: 'pending',
-        $priority: 0,
-        $maxRetries: 3,
-        $runAt: now,
-        $batchId: null,
-        $uniqueKey: null,
-        $backoffConfig: null
-      });
+      // Enqueue "finally" callback job regardless of failures
+      if (options.finallyType) {
+        this.insertJobStmt.run({
+          $type: options.finallyType,
+          $data: JSON.stringify(options.finallyData ?? {}),
+          $status: 'pending',
+          $priority: 0,
+          $maxRetries: 3,
+          $runAt: now,
+          $batchId: null,
+          $uniqueKey: null,
+          $backoffConfig: null,
+          $expireAt: null,
+          $webhookConfig: null
+        });
+      }
     }
 
-    // Enqueue "finally" callback job regardless of failures
-    if (options.finallyType) {
-      this.insertJobStmt.run({
-        $type: options.finallyType,
-        $data: JSON.stringify(options.finallyData ?? {}),
-        $status: 'pending',
-        $priority: 0,
-        $maxRetries: 3,
-        $runAt: now,
-        $batchId: null,
-        $uniqueKey: null,
-        $backoffConfig: null
-      });
+    const finishedBatch = this.selectBatchStmt.get({
+      $id: batchId
+    }) as JobBatchRow | null;
+    if (finishedBatch) {
+      const b = toBatch(finishedBatch);
+      if (b.failedJobs === 0) {
+        this.emit('batch:complete', b);
+      } else {
+        this.emit('batch:failed', b);
+      }
     }
   }
 }

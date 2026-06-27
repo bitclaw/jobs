@@ -15,6 +15,7 @@ export class JobWorker<
   private abortController: AbortController | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  private paused = false;
   private activeCount = 0;
   private stopResolve: (() => void) | null = null;
 
@@ -34,6 +35,10 @@ export class JobWorker<
 
   get isRunning(): boolean {
     return this.running;
+  }
+
+  get isPaused(): boolean {
+    return this.paused;
   }
 
   start(): void {
@@ -61,6 +66,22 @@ export class JobWorker<
     }
   }
 
+  pause(): void {
+    this.paused = true;
+  }
+
+  resume(): void {
+    this.paused = false;
+    if (this.running) {
+      // Cancel existing timer and poll immediately
+      if (this.timer) {
+        clearTimeout(this.timer);
+        this.timer = null;
+      }
+      void this.poll();
+    }
+  }
+
   private scheduleNext(): void {
     if (!this.running) return;
     const interval = this.options.pollIntervalMs ?? 1000;
@@ -69,14 +90,19 @@ export class JobWorker<
 
   private async poll(): Promise<void> {
     if (!this.running) return;
+    if (this.paused) {
+      this.scheduleNext();
+      return;
+    }
 
     const concurrency = this.options.concurrency ?? 1;
+    const leaseMs = this.options.leaseMs ?? 300_000;
 
     // Drain available jobs up to available capacity in one poll tick
     while (this.activeCount < concurrency) {
       if (this.rateLimiter && !this.rateLimiter.canProceed()) break;
 
-      const job = this.queue.pollAndClaim(this.options.type);
+      const job = this.queue.pollAndClaim(this.options.type, leaseMs);
       if (!job) break;
 
       this.rateLimiter?.record();
@@ -93,13 +119,17 @@ export class JobWorker<
         reportProgress: (percent: number) => {
           this.queue.updateProgress(job.id, percent);
         },
+        renewLease: () => {
+          this.queue.renewLease(job.id, this.options.leaseMs ?? 300_000);
+        },
         signal: this.abortController!.signal
       };
 
       const handlerPromise = this.options.handler(job as Job<TMap[K]>, ctx);
+      let handlerResult: unknown;
       if (this.options.timeoutMs) {
         const timeoutMs = this.options.timeoutMs;
-        await Promise.race([
+        handlerResult = await Promise.race([
           handlerPromise,
           new Promise<never>((_, reject) =>
             setTimeout(
@@ -109,10 +139,10 @@ export class JobWorker<
           )
         ]);
       } else {
-        await handlerPromise;
+        handlerResult = await handlerPromise;
       }
 
-      this.queue.markJobDone(job.id);
+      this.queue.markJobDone(job.id, handlerResult);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       // Check both instanceof (same bundle) and the isNonRetryable property
@@ -122,7 +152,12 @@ export class JobWorker<
         (typeof error === 'object' &&
           error !== null &&
           (error as { isNonRetryable?: unknown }).isNonRetryable === true);
-      if (isNonRetryable) {
+
+      const shouldRetry = this.options.retryIf
+        ? this.options.retryIf(error, job as Job<TMap[K]>)
+        : true;
+
+      if (isNonRetryable || !shouldRetry) {
         this.queue.markJobDead(job.id, message);
       } else {
         this.queue.markJobFailed(job.id, message);

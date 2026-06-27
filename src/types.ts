@@ -42,6 +42,10 @@ export type Job<T = unknown> = {
   readonly batchId: string | null;
   readonly requestLog: string | null;
   readonly responseLog: string | null;
+  readonly uniqueKey: string | null;
+  readonly claimedUntil: string | null;
+  readonly result: unknown | null;
+  readonly expireAt: string | null;
 };
 
 export type FailedJob = {
@@ -59,7 +63,7 @@ export type FailedJob = {
 };
 
 export type BackoffConfig = {
-  type: 'exponential' | 'fixed';
+  type: 'exponential' | 'fixed' | 'jitter' | 'fibonacci';
   /** Base delay in ms. Exponential: delayMs * 2^retryCount. Fixed: always delayMs. Max 1h. */
   delayMs: number;
 };
@@ -80,11 +84,19 @@ export type AddJobOptions = {
    * Fixed: always delayMs between retries. Default: retry immediately.
    */
   backoff?: BackoffConfig;
+  dedup?: 'ignore' | 'replace';
+  expireAt?: Date;
+  onComplete?: {
+    url: string;
+    method?: string;
+    headers?: Record<string, string>;
+  };
 };
 
 export type JobContext = {
   reportProgress: (percent: number) => void;
   signal: AbortSignal;
+  renewLease(): void;
 };
 
 export type RateLimit = {
@@ -94,7 +106,7 @@ export type RateLimit = {
 
 export type WorkerOptions<T = unknown> = {
   type: string;
-  handler: (job: Job<T>, ctx: JobContext) => Promise<void>;
+  handler: (job: Job<T>, ctx: JobContext) => Promise<unknown>;
   pollIntervalMs?: number;
   maxRate?: RateLimit;
   onError?: (job: Job<T>, error: unknown) => void;
@@ -102,6 +114,9 @@ export type WorkerOptions<T = unknown> = {
   timeoutMs?: number;
   /** Max concurrent jobs this worker runs simultaneously. Default: 1. */
   concurrency?: number;
+  leaseMs?: number;
+  retryIf?: (error: unknown, job: Job<T>) => boolean;
+  aging?: { boostPerMinute: number; maxBoost: number };
 };
 
 export type JobStats = {
@@ -154,6 +169,10 @@ export type JobRow = {
   response_log: string | null;
   unique_key: string | null;
   backoff_config: string | null;
+  claimed_until: string | null;
+  result: string | null;
+  expire_at: string | null;
+  webhook_config: string | null;
 };
 
 export type FailedJobRow = {

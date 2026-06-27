@@ -261,4 +261,122 @@ describe('JobWorker', () => {
 
     expect(processedCount).toBeLessThanOrEqual(2);
   });
+
+  describe('retryIf predicate', () => {
+    test('retryIf returning false → markJobDead skip retries', async () => {
+      const id = queue.add('test:work', { value: 'die' }, { maxRetries: 5 });
+
+      const worker = queue.createWorker({
+        type: 'test:work',
+        handler: async () => {
+          throw new Error('bad input');
+        },
+        retryIf: () => false,
+        pollIntervalMs: 10
+      });
+
+      worker.start();
+      await sleep(100);
+      await worker.stop();
+
+      expect(queue.getJob(id)).toBeNull();
+      const failed = queue.getFailedJobs();
+      expect(failed.items).toHaveLength(1);
+    });
+
+    test('retryIf returning true → normal retry', async () => {
+      let calls = 0;
+      const id = queue.add('test:work', { value: 'retry' }, { maxRetries: 3 });
+
+      const worker = queue.createWorker({
+        type: 'test:work',
+        handler: async () => {
+          calls++;
+          if (calls < 3) throw new Error('transient');
+        },
+        retryIf: () => true,
+        pollIntervalMs: 10
+      });
+
+      worker.start();
+      await sleep(200);
+      await worker.stop();
+
+      expect(calls).toBe(3);
+      expect(queue.getJob(id)!.status).toBe('done');
+    });
+  });
+
+  describe('pause/resume', () => {
+    test('pause stops claiming new jobs', async () => {
+      let processed = 0;
+      for (let i = 0; i < 3; i++) {
+        queue.add('test:work', { value: `j${i}` });
+      }
+
+      const worker = queue.createWorker({
+        type: 'test:work',
+        handler: async () => {
+          processed++;
+        },
+        pollIntervalMs: 10
+      });
+
+      worker.start();
+      worker.pause();
+      await sleep(100);
+      await worker.stop();
+
+      expect(processed).toBe(0);
+      expect(worker.isPaused).toBe(true);
+    });
+
+    test('resume restarts processing', async () => {
+      let processed = 0;
+      for (let i = 0; i < 3; i++) {
+        queue.add('test:work', { value: `j${i}` });
+      }
+
+      const worker = queue.createWorker({
+        type: 'test:work',
+        handler: async () => {
+          processed++;
+        },
+        pollIntervalMs: 50
+      });
+
+      worker.start();
+      worker.pause();
+      await sleep(80);
+      expect(processed).toBe(0);
+
+      worker.resume();
+      await sleep(300);
+      await worker.stop();
+
+      expect(processed).toBe(3);
+    });
+  });
+
+  describe('handler result captured', () => {
+    test('handler return value stored in job result', async () => {
+      const id = queue.add('test:work', { value: 'compute' });
+      const worker = queue.createWorker({
+        type: 'test:work',
+        handler: async job => {
+          return { processed: job.data.value, count: 42 };
+        },
+        pollIntervalMs: 10
+      });
+
+      worker.start();
+      await sleep(100);
+      await worker.stop();
+
+      const result = queue.getJobResult<{ processed: string; count: number }>(
+        id
+      );
+      expect(result).toEqual({ processed: 'compute', count: 42 });
+    });
+  });
 });

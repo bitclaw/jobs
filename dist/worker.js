@@ -7,7 +7,8 @@ export class JobWorker {
     abortController = null;
     timer = null;
     running = false;
-    processing = false;
+    paused = false;
+    activeCount = 0;
     stopResolve = null;
     constructor(queue, options) {
         this.queue = queue;
@@ -18,6 +19,9 @@ export class JobWorker {
     }
     get isRunning() {
         return this.running;
+    }
+    get isPaused() {
+        return this.paused;
     }
     start() {
         if (this.running)
@@ -35,10 +39,24 @@ export class JobWorker {
             this.timer = null;
         }
         this.abortController?.abort();
-        if (this.processing) {
+        if (this.activeCount > 0) {
             return new Promise(resolve => {
                 this.stopResolve = resolve;
             });
+        }
+    }
+    pause() {
+        this.paused = true;
+    }
+    resume() {
+        this.paused = false;
+        if (this.running) {
+            // Cancel existing timer and poll immediately
+            if (this.timer) {
+                clearTimeout(this.timer);
+                this.timer = null;
+            }
+            void this.poll();
         }
     }
     scheduleNext() {
@@ -50,36 +68,49 @@ export class JobWorker {
     async poll() {
         if (!this.running)
             return;
-        if (this.rateLimiter && !this.rateLimiter.canProceed()) {
+        if (this.paused) {
             this.scheduleNext();
             return;
         }
-        const job = this.queue.pollAndClaim(this.options.type);
-        if (!job) {
-            this.scheduleNext();
-            return;
+        const concurrency = this.options.concurrency ?? 1;
+        const leaseMs = this.options.leaseMs ?? 300_000;
+        // Drain available jobs up to available capacity in one poll tick
+        while (this.activeCount < concurrency) {
+            if (this.rateLimiter && !this.rateLimiter.canProceed())
+                break;
+            const job = this.queue.pollAndClaim(this.options.type, leaseMs);
+            if (!job)
+                break;
+            this.rateLimiter?.record();
+            this.activeCount++;
+            void this.runJob(job);
         }
-        this.processing = true;
+        this.scheduleNext();
+    }
+    async runJob(job) {
         try {
             const ctx = {
                 reportProgress: (percent) => {
                     this.queue.updateProgress(job.id, percent);
                 },
+                renewLease: () => {
+                    this.queue.renewLease(job.id, this.options.leaseMs ?? 300_000);
+                },
                 signal: this.abortController.signal
             };
-            this.rateLimiter?.record();
             const handlerPromise = this.options.handler(job, ctx);
+            let handlerResult;
             if (this.options.timeoutMs) {
                 const timeoutMs = this.options.timeoutMs;
-                await Promise.race([
+                handlerResult = await Promise.race([
                     handlerPromise,
                     new Promise((_, reject) => setTimeout(() => reject(new Error(`Job timed out after ${timeoutMs}ms`)), timeoutMs))
                 ]);
             }
             else {
-                await handlerPromise;
+                handlerResult = await handlerPromise;
             }
-            this.queue.markJobDone(job.id);
+            this.queue.markJobDone(job.id, handlerResult);
         }
         catch (error) {
             const message = error instanceof Error ? error.message : String(error);
@@ -89,7 +120,10 @@ export class JobWorker {
                 (typeof error === 'object' &&
                     error !== null &&
                     error.isNonRetryable === true);
-            if (isNonRetryable) {
+            const shouldRetry = this.options.retryIf
+                ? this.options.retryIf(error, job)
+                : true;
+            if (isNonRetryable || !shouldRetry) {
                 this.queue.markJobDead(job.id, message);
             }
             else {
@@ -98,13 +132,10 @@ export class JobWorker {
             this.options.onError?.(job, error);
         }
         finally {
-            this.processing = false;
-            if (this.stopResolve) {
+            this.activeCount--;
+            if (!this.running && this.activeCount === 0 && this.stopResolve) {
                 this.stopResolve();
                 this.stopResolve = null;
-            }
-            else {
-                this.scheduleNext();
             }
         }
     }

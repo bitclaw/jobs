@@ -1,7 +1,8 @@
 import { Database } from 'bun:sqlite';
+import { JobQueueEmitter } from './events';
 import type { AddJobOptions, BatchOptions, FailedJob, Job, JobBatch, JobMap, JobStats, ListJobsOptions, PaginatedResult, PurgeOptions, WorkerOptions } from './types';
 import { JobWorker } from './worker';
-export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> {
+export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> extends JobQueueEmitter {
     readonly db: Database;
     private readonly insertJobStmt;
     private readonly selectDedupedJobStmt;
@@ -20,6 +21,7 @@ export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> {
     private readonly countUnmetDepsStmt;
     private readonly unblockJobStmt;
     private readonly lastInsertRowIdStmt;
+    private readonly renewLeaseStmt;
     private readonly insertBatchStmt;
     private readonly selectBatchStmt;
     private readonly decrementBatchPendingStmt;
@@ -44,10 +46,12 @@ export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> {
     retryFailedJob(failedJobId: number): number;
     purgeFailedJobs(olderThanMs: number): number;
     purge(options: PurgeOptions): number;
-    pollAndClaim(type: string): Job | null;
-    markJobDone(id: number): void;
+    pollAndClaim(type: string, leaseMs?: number): Job | null;
+    renewLease(id: number, leaseMs: number): void;
+    markJobDone(id: number, result?: unknown): void;
     markJobDead(id: number, error: string): void;
     markJobFailed(id: number, error: string): void;
+    private fib;
     updateProgress(id: number, progress: number): void;
     createBatch(name: string, options?: BatchOptions): string;
     addToBatch<K extends string & keyof TMap>(batchId: string, type: K, data: TMap[K], options?: AddJobOptions): number;
@@ -57,6 +61,22 @@ export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> {
         type: K;
     }): JobWorker<TMap, K>;
     private insertJob;
+    /**
+     * Reset stuck `processing` jobs back to `pending`. Call at startup to recover
+     * from server crashes that left jobs claimed but never completed.
+     * @param thresholdMs Jobs processing longer than this (ms) are reset. Default 5min.
+     * @returns Number of jobs reset.
+     */
+    reconcileStaleJobs(thresholdMs?: number): number;
+    /**
+     * Look up a pending or processing job by its uniqueKey.
+     * Returns null if no such job exists (completed, dead-lettered, or never queued).
+     */
+    getJobByUniqueKey(type: string, uniqueKey: string): Job | null;
+    getJobResult<T>(id: number): T | null;
+    cancelByUniqueKey(type: string, uniqueKey: string): boolean;
+    retryFailedJobsByType(type: string): number;
+    purgeExpiredJobs(): number;
     close(): void;
     private unblockDependents;
     private handleBatchJobComplete;

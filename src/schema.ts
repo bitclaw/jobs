@@ -22,7 +22,11 @@ CREATE TABLE IF NOT EXISTS jobs (
   response_log TEXT,
   batch_id TEXT REFERENCES job_batches(id),
   unique_key TEXT,
-  backoff_config TEXT
+  backoff_config TEXT,
+  claimed_until TEXT,
+  result TEXT,
+  expire_at TEXT,
+  webhook_config TEXT
 )`;
 
 // State-aware dedup: same (type, unique_key) cannot be both pending/processing at once.
@@ -134,6 +138,18 @@ export function initializeSchema(db: Database): void {
   }
   if (!cols.some(c => c.name === 'backoff_config')) {
     db.run('ALTER TABLE jobs ADD COLUMN backoff_config TEXT');
+  }
+  if (!cols.some(c => c.name === 'claimed_until')) {
+    db.run('ALTER TABLE jobs ADD COLUMN claimed_until TEXT');
+  }
+  if (!cols.some(c => c.name === 'result')) {
+    db.run('ALTER TABLE jobs ADD COLUMN result TEXT');
+  }
+  if (!cols.some(c => c.name === 'expire_at')) {
+    db.run('ALTER TABLE jobs ADD COLUMN expire_at TEXT');
+  }
+  if (!cols.some(c => c.name === 'webhook_config')) {
+    db.run('ALTER TABLE jobs ADD COLUMN webhook_config TEXT');
   }
   db.run(JOBS_UNIQUE_KEY_INDEX);
 }

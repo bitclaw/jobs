@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import { JobQueue } from './queue';
 
 type TestJobs = {
   'email:send': { to: string; subject: string };
   'deploy:provision': { serverId: string };
+  'test:simple': { value: string };
 };
 
 describe('JobQueue', () => {
@@ -833,6 +834,217 @@ describe('JobQueue', () => {
 
     test('returns null when no uniqueKey match', () => {
       expect(queue.getJobByUniqueKey('email:send', 'nonexistent')).toBeNull();
+    });
+  });
+
+  describe('multi-process lease safety', () => {
+    test('pollAndClaim sets claimed_until', () => {
+      queue.add('test:simple', { value: 'a' });
+      const job = queue.pollAndClaim('test:simple', 60_000);
+      expect(job).not.toBeNull();
+      // job is now processing with claimed_until ~60s from now
+      const stats = queue.getStats();
+      expect(stats.processing).toBe(1);
+    });
+
+    test('reclaims expired lease', async () => {
+      queue.add('test:simple', { value: 'a' });
+      // claim with 1ms lease (expires immediately)
+      const job1 = queue.pollAndClaim('test:simple', 1);
+      expect(job1).not.toBeNull();
+      await new Promise(r => setTimeout(r, 10));
+      // second poll reclaims expired lease
+      const job2 = queue.pollAndClaim('test:simple', 60_000);
+      expect(job2).not.toBeNull();
+      expect(job2!.id).toBe(job1!.id);
+    });
+
+    test('does not reclaim active lease', () => {
+      queue.add('test:simple', { value: 'a' });
+      const job1 = queue.pollAndClaim('test:simple', 60_000);
+      expect(job1).not.toBeNull();
+      const job2 = queue.pollAndClaim('test:simple', 60_000);
+      expect(job2).toBeNull();
+    });
+
+    test('renewLease extends claimed_until', async () => {
+      queue.add('test:simple', { value: 'a' });
+      const job = queue.pollAndClaim('test:simple', 1);
+      expect(job).not.toBeNull();
+      // renew with 60s lease
+      queue.renewLease(job!.id, 60_000);
+      await new Promise(r => setTimeout(r, 10));
+      // should NOT be reclaimable now
+      const job2 = queue.pollAndClaim('test:simple', 60_000);
+      expect(job2).toBeNull();
+    });
+  });
+
+  describe('per-job result', () => {
+    test('getJobResult returns null for no result', () => {
+      const id = queue.add('test:simple', { value: 'a' });
+      expect(queue.getJobResult(id)).toBeNull();
+    });
+
+    test('markJobDone stores result', () => {
+      const id = queue.add('test:simple', { value: 'a' });
+      queue.pollAndClaim('test:simple');
+      queue.markJobDone(id, { ok: true, count: 42 });
+      expect(queue.getJobResult<{ ok: boolean; count: number }>(id)).toEqual({
+        ok: true,
+        count: 42
+      });
+    });
+
+    test('getJobResult type param works', () => {
+      const id = queue.add('test:simple', { value: 'a' });
+      queue.pollAndClaim('test:simple');
+      queue.markJobDone(id, 'hello');
+      const r = queue.getJobResult<string>(id);
+      expect(r).toBe('hello');
+    });
+  });
+
+  describe('cancelByUniqueKey', () => {
+    test('cancels pending job by unique key', () => {
+      queue.add('test:simple', { value: 'a' }, { uniqueKey: 'k1' });
+      const cancelled = queue.cancelByUniqueKey('test:simple', 'k1');
+      expect(cancelled).toBe(true);
+      const stats = queue.getStats();
+      expect(stats.cancelled).toBe(1);
+    });
+
+    test('returns false if no matching job', () => {
+      const cancelled = queue.cancelByUniqueKey('test:simple', 'nonexistent');
+      expect(cancelled).toBe(false);
+    });
+
+    test('does not cancel processing job', () => {
+      queue.add('test:simple', { value: 'a' }, { uniqueKey: 'k2' });
+      queue.pollAndClaim('test:simple');
+      const cancelled = queue.cancelByUniqueKey('test:simple', 'k2');
+      expect(cancelled).toBe(false);
+    });
+  });
+
+  describe('retryFailedJobsByType', () => {
+    test('re-enqueues all failed jobs of given type', () => {
+      const id1 = queue.add('test:simple', { value: 'a' }, { maxRetries: 1 });
+      const id2 = queue.add('test:simple', { value: 'b' }, { maxRetries: 1 });
+      queue.pollAndClaim('test:simple');
+      queue.markJobFailed(id1, 'err1');
+      queue.pollAndClaim('test:simple');
+      queue.markJobFailed(id2, 'err2');
+
+      expect(queue.getStats().dead).toBe(2);
+
+      const count = queue.retryFailedJobsByType('test:simple');
+      expect(count).toBe(2);
+      expect(queue.getStats().dead).toBe(0);
+      expect(queue.getStats().pending).toBe(2);
+    });
+
+    test('returns 0 for type with no failed jobs', () => {
+      expect(queue.retryFailedJobsByType('test:simple')).toBe(0);
+    });
+  });
+
+  describe('job TTL', () => {
+    test('expired job not claimed', async () => {
+      const past = new Date(Date.now() - 1000);
+      queue.add('test:simple', { value: 'a' }, { expireAt: past });
+      const job = queue.pollAndClaim('test:simple');
+      expect(job).toBeNull();
+    });
+
+    test('non-expired job still claimed', () => {
+      const future = new Date(Date.now() + 60_000);
+      queue.add('test:simple', { value: 'a' }, { expireAt: future });
+      const job = queue.pollAndClaim('test:simple');
+      expect(job).not.toBeNull();
+    });
+
+    test('purgeExpiredJobs removes expired pending', () => {
+      const past = new Date(Date.now() - 1000);
+      queue.add('test:simple', { value: 'a' }, { expireAt: past });
+      const count = queue.purgeExpiredJobs();
+      expect(count).toBe(1);
+      expect(queue.getStats().pending).toBe(0);
+    });
+  });
+
+  describe('typed event emitter', () => {
+    test('job:done fires after markJobDone', () => {
+      const handler = vi.fn();
+      queue.on('job:done', handler);
+      const id = queue.add('test:simple', { value: 'a' });
+      queue.pollAndClaim('test:simple');
+      queue.markJobDone(id);
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(handler.mock.calls[0]![0].id).toBe(id);
+    });
+
+    test('job:dead fires after markJobDead', () => {
+      const handler = vi.fn();
+      queue.on('job:dead', handler);
+      const id = queue.add('test:simple', { value: 'a' });
+      queue.pollAndClaim('test:simple');
+      queue.markJobDead(id, 'fatal');
+      expect(handler).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'test:simple' }),
+        'fatal'
+      );
+    });
+
+    test('on() returns unsubscribe fn', () => {
+      const handler = vi.fn();
+      const unsub = queue.on('job:done', handler);
+      unsub();
+      const id = queue.add('test:simple', { value: 'a' });
+      queue.pollAndClaim('test:simple');
+      queue.markJobDone(id);
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    test('once() fires only one time', () => {
+      const handler = vi.fn();
+      queue.once('job:done', handler);
+      for (let i = 0; i < 3; i++) {
+        const id = queue.add('test:simple', { value: `j${i}` });
+        queue.pollAndClaim('test:simple');
+        queue.markJobDone(id);
+      }
+      expect(handler).toHaveBeenCalledTimes(1);
+    });
+
+    test('job:stale fires with count from reconcileStaleJobs', () => {
+      const handler = vi.fn();
+      queue.on('job:stale', handler);
+      // Manually insert a stale processing job
+      queue.db.run(
+        "INSERT INTO jobs (type, data, status, priority, max_retries, run_at, updated_at) VALUES ('test:simple', '{}', 'processing', 0, 3, datetime('now'), datetime('now', '-1 hour'))"
+      );
+      const count = queue.reconcileStaleJobs(1); // 1ms threshold
+      expect(count).toBe(1);
+      expect(handler).toHaveBeenCalledWith(1);
+    });
+  });
+
+  describe('dedup replace mode', () => {
+    test('replace updates data of existing pending job', () => {
+      const id1 = queue.add(
+        'test:simple',
+        { value: 'old' },
+        { uniqueKey: 'k1' }
+      );
+      const id2 = queue.add(
+        'test:simple',
+        { value: 'new' },
+        { uniqueKey: 'k1', dedup: 'replace' }
+      );
+      expect(id1).toBe(id2); // same job
+      const job = queue.getJob(id1)!;
+      expect((job.data as { value: string }).value).toBe('new'); // data updated
     });
   });
 });
