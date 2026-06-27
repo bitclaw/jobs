@@ -1,5 +1,6 @@
 import { SlidingWindowRateLimiter } from './rate-limiter';
 import { NonRetryableError } from './types';
+import { nowISO } from './utils';
 export class JobWorker {
     queue;
     options;
@@ -85,6 +86,29 @@ export class JobWorker {
             this.activeCount++;
             void this.runJob(job);
         }
+        // Apply priority aging if configured
+        if (this.options.aging) {
+            const { boostPerMinute, maxBoost } = this.options.aging;
+            const pollIntervalMs = this.options.pollIntervalMs ?? 1000;
+            const boostPerTick = (boostPerMinute * pollIntervalMs) / 60_000;
+            if (boostPerTick > 0) {
+                const cutoff = new Date(Date.now() - pollIntervalMs).toISOString();
+                this.queue.db.run(`UPDATE jobs
+           SET priority = MIN(priority + ?, ?),
+               updated_at = ?
+           WHERE status = 'pending'
+             AND type = ?
+             AND created_at < ?
+             AND priority < ?`, [
+                    boostPerTick,
+                    maxBoost,
+                    nowISO(),
+                    this.options.type,
+                    cutoff,
+                    maxBoost
+                ]);
+            }
+        }
         this.scheduleNext();
     }
     async runJob(job) {
@@ -98,17 +122,29 @@ export class JobWorker {
                 },
                 signal: this.abortController.signal
             };
-            const handlerPromise = this.options.handler(job, ctx);
+            const handler = this.options.handler;
+            const middlewares = this.queue.middlewares;
+            const chain = [...middlewares, (j) => handler(j, ctx)];
+            const execute = () => {
+                let i = 0;
+                const run = () => {
+                    const mw = chain[i++];
+                    if (!mw)
+                        return Promise.resolve(undefined);
+                    return mw(job, run);
+                };
+                return run();
+            };
             let handlerResult;
             if (this.options.timeoutMs) {
                 const timeoutMs = this.options.timeoutMs;
                 handlerResult = await Promise.race([
-                    handlerPromise,
+                    execute(),
                     new Promise((_, reject) => setTimeout(() => reject(new Error(`Job timed out after ${timeoutMs}ms`)), timeoutMs))
                 ]);
             }
             else {
-                handlerResult = await handlerPromise;
+                handlerResult = await execute();
             }
             this.queue.markJobDone(job.id, handlerResult);
         }

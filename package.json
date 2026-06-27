@@ -1,6 +1,6 @@
 {
   "name": "@bitclaw/jobs",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "description": "SQLite-backed background job queue using bun:sqlite",
   "files": [
     "dist",
@@ -38,6 +38,10 @@
     "./scheduler": {
       "types": "./dist/scheduler.d.ts",
       "default": "./dist/scheduler.js"
+    },
+    "./workflow": {
+      "types": "./dist/workflow.d.ts",
+      "default": "./dist/workflow.js"
     }
   },
   "scripts": {

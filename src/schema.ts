@@ -104,6 +104,27 @@ const SCHEDULES_NEXT_RUN_INDEX = `
 CREATE INDEX IF NOT EXISTS idx_schedules_next_run
   ON schedules (enabled, next_run_at)`;
 
+const WORKFLOW_EXECUTIONS_TABLE = `
+CREATE TABLE IF NOT EXISTS workflow_executions (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  completed_at TEXT
+)`;
+
+const WORKFLOW_STEPS_TABLE = `
+CREATE TABLE IF NOT EXISTS workflow_steps (
+  execution_id TEXT NOT NULL REFERENCES workflow_executions(id),
+  step_name TEXT NOT NULL,
+  job_id INTEGER NOT NULL,
+  compensate_type TEXT,
+  compensate_data TEXT,
+  compensate_job_id INTEGER,
+  step_order INTEGER NOT NULL,
+  PRIMARY KEY (execution_id, step_name)
+)`;
+
 export function applyPragmas(db: Database): void {
   if (db.filename !== ':memory:' && db.filename !== '') {
     db.run('PRAGMA journal_mode = WAL');
@@ -128,6 +149,8 @@ export function initializeSchema(db: Database): void {
   db.run(FAILED_JOBS_TABLE);
   db.run(SCHEDULES_TABLE);
   db.run(SCHEDULES_NEXT_RUN_INDEX);
+  db.run(WORKFLOW_EXECUTIONS_TABLE);
+  db.run(WORKFLOW_STEPS_TABLE);
 
   // Migrations for columns added after initial schema creation
   const cols = db.prepare('PRAGMA table_info(jobs)').all() as Array<{

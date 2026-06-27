@@ -28,7 +28,12 @@ export type {
   PurgeOptions,
   RateLimit,
   Schedule,
-  WorkerOptions
+  WorkerOptions,
+  WorkflowExecution,
+  WorkflowExecutionStatus,
+  WorkflowReconcileResult,
+  WorkflowRunResult
 } from './types';
 export { NonRetryableError } from './types';
 export { JobWorker } from './worker';
+export { WorkflowBuilder, WorkflowEngine } from './workflow';

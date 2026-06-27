@@ -1,9 +1,10 @@
 import { Database } from 'bun:sqlite';
 import { JobQueueEmitter } from './events';
-import type { AddJobOptions, BatchOptions, FailedJob, Job, JobBatch, JobMap, JobStats, ListJobsOptions, PaginatedResult, PurgeOptions, WorkerOptions } from './types';
+import type { AddJobOptions, BatchOptions, FailedJob, Job, JobBatch, JobGraphNode, JobMap, JobStats, ListJobsOptions, MiddlewareFn, PaginatedResult, PurgeOptions, WorkerOptions } from './types';
 import { JobWorker } from './worker';
 export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> extends JobQueueEmitter {
     readonly db: Database;
+    readonly middlewares: MiddlewareFn[];
     private readonly insertJobStmt;
     private readonly selectDedupedJobStmt;
     private readonly insertDepStmt;
@@ -77,6 +78,9 @@ export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> ext
     cancelByUniqueKey(type: string, uniqueKey: string): boolean;
     retryFailedJobsByType(type: string): number;
     purgeExpiredJobs(): number;
+    use(fn: MiddlewareFn): void;
+    getJobGraph(rootId: number): JobGraphNode[];
+    mountAdminHandler(prefix?: string): (req: Request) => Promise<Response>;
     close(): void;
     private unblockDependents;
     private handleBatchJobComplete;
