@@ -1,6 +1,6 @@
 {
   "name": "@bitclaw/jobs",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "SQLite-backed background job queue using bun:sqlite",
   "files": [
     "dist",

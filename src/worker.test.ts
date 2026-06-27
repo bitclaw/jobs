@@ -182,6 +182,62 @@ describe('JobWorker', () => {
     expect(worker.isRunning).toBe(false);
   });
 
+  test('concurrency: runs N jobs simultaneously', async () => {
+    let concurrentPeak = 0;
+    let current = 0;
+    let completed = 0;
+
+    for (let i = 0; i < 4; i++) {
+      queue.add('test:work', { value: `job-${i}` });
+    }
+
+    const worker = queue.createWorker({
+      type: 'test:work',
+      concurrency: 3,
+      handler: async () => {
+        current++;
+        if (current > concurrentPeak) concurrentPeak = current;
+        await sleep(30);
+        completed++;
+        current--;
+      },
+      pollIntervalMs: 10
+    });
+
+    worker.start();
+    await sleep(300);
+    await worker.stop();
+
+    expect(completed).toBe(4);
+    expect(concurrentPeak).toBeGreaterThanOrEqual(2);
+  });
+
+  test('concurrency=1 default: no concurrent execution', async () => {
+    let peak = 0;
+    let current = 0;
+
+    for (let i = 0; i < 3; i++) {
+      queue.add('test:work', { value: `job-${i}` });
+    }
+
+    const worker = queue.createWorker({
+      type: 'test:work',
+      handler: async () => {
+        current++;
+        if (current > peak) peak = current;
+        await sleep(20);
+        current--;
+      },
+      pollIntervalMs: 10
+    });
+
+    worker.start();
+    await sleep(300);
+    await worker.stop();
+
+    expect(peak).toBe(1);
+  });
+
   test('does not claim jobs when rate limited', async () => {
     let processedCount = 0;
 

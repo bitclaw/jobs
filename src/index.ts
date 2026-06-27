@@ -10,6 +10,7 @@ export { applyPragmas, initializeSchema } from './schema';
 export type {
   AddJobOptions,
   AddScheduleOptions,
+  BackoffConfig,
   BatchOptions,
   FailedJob,
   Job,

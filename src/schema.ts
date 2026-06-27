@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   request_log TEXT,
   response_log TEXT,
   batch_id TEXT REFERENCES job_batches(id),
-  unique_key TEXT
+  unique_key TEXT,
+  backoff_config TEXT
 )`;
 
 // State-aware dedup: same (type, unique_key) cannot be both pending/processing at once.
@@ -124,12 +125,15 @@ export function initializeSchema(db: Database): void {
   db.run(SCHEDULES_TABLE);
   db.run(SCHEDULES_NEXT_RUN_INDEX);
 
-  // Migration: add unique_key to existing DBs that were created before v1.2.0
-  const cols = db
-    .prepare("PRAGMA table_info(jobs)")
-    .all() as Array<{ name: string }>;
+  // Migrations for columns added after initial schema creation
+  const cols = db.prepare('PRAGMA table_info(jobs)').all() as Array<{
+    name: string;
+  }>;
   if (!cols.some(c => c.name === 'unique_key')) {
     db.run('ALTER TABLE jobs ADD COLUMN unique_key TEXT');
+  }
+  if (!cols.some(c => c.name === 'backoff_config')) {
+    db.run('ALTER TABLE jobs ADD COLUMN backoff_config TEXT');
   }
   db.run(JOBS_UNIQUE_KEY_INDEX);
 }

@@ -6,6 +6,7 @@ import { dirname } from 'node:path';
 import { applyPragmas, initializeSchema } from './schema';
 import type {
   AddJobOptions,
+  BackoffConfig,
   BatchOptions,
   FailedJob,
   FailedJobRow,
@@ -114,8 +115,8 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
     initializeSchema(this.db);
 
     this.insertJobStmt = this.db.query(`
-      INSERT OR IGNORE INTO jobs (type, data, status, priority, max_retries, run_at, batch_id, unique_key)
-      VALUES ($type, $data, $status, $priority, $maxRetries, $runAt, $batchId, $uniqueKey)
+      INSERT OR IGNORE INTO jobs (type, data, status, priority, max_retries, run_at, batch_id, unique_key, backoff_config)
+      VALUES ($type, $data, $status, $priority, $maxRetries, $runAt, $batchId, $uniqueKey, $backoffConfig)
     `);
     this.selectDedupedJobStmt = this.db.query(`
       SELECT id FROM jobs
@@ -146,6 +147,7 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
       SET status = 'pending',
           retry_count = retry_count + 1,
           error = $error,
+          run_at = $runAt,
           updated_at = $now
       WHERE id = $id
     `);
@@ -369,7 +371,8 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
       $maxRetries: row.max_retries,
       $runAt: now,
       $batchId: null,
-      $uniqueKey: null
+      $uniqueKey: null,
+      $backoffConfig: null
     });
 
     const newJobId = this.lastInsertRowIdStmt.get() as { id: number };
@@ -483,7 +486,23 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
           this.handleBatchJobComplete(row.batch_id);
         }
       } else {
-        this.markFailedStmt.run({ $id: id, $error: error, $now: now });
+        const backoff = row.backoff_config
+          ? (JSON.parse(row.backoff_config) as BackoffConfig)
+          : null;
+        let retryRunAt = now;
+        if (backoff) {
+          const delayMs =
+            backoff.type === 'exponential'
+              ? Math.min(backoff.delayMs * 2 ** row.retry_count, 3_600_000)
+              : backoff.delayMs;
+          retryRunAt = new Date(Date.now() + delayMs).toISOString();
+        }
+        this.markFailedStmt.run({
+          $id: id,
+          $error: error,
+          $runAt: retryRunAt,
+          $now: now
+        });
       }
     })();
   }
@@ -564,7 +583,8 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
       $maxRetries: options?.maxRetries ?? 3,
       $runAt: runAt,
       $batchId: batchId,
-      $uniqueKey: options?.uniqueKey ?? null
+      $uniqueKey: options?.uniqueKey ?? null,
+      $backoffConfig: options?.backoff ? JSON.stringify(options.backoff) : null
     });
 
     // INSERT OR IGNORE: if a pending/processing job with same (type, uniqueKey)
@@ -593,6 +613,42 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
     }
 
     return jobId.id;
+  }
+
+  /**
+   * Reset stuck `processing` jobs back to `pending`. Call at startup to recover
+   * from server crashes that left jobs claimed but never completed.
+   * @param thresholdMs Jobs processing longer than this (ms) are reset. Default 5min.
+   * @returns Number of jobs reset.
+   */
+  reconcileStaleJobs(thresholdMs = 300_000): number {
+    const cutoff = new Date(Date.now() - thresholdMs).toISOString();
+    const result = this.db
+      .query(
+        `UPDATE jobs
+         SET status = 'pending',
+             error = 'stale: worker crash or restart — reset for retry',
+             updated_at = $now
+         WHERE status = 'processing' AND updated_at < $cutoff`
+      )
+      .run({ $now: nowISO(), $cutoff: cutoff });
+    return result.changes;
+  }
+
+  /**
+   * Look up a pending or processing job by its uniqueKey.
+   * Returns null if no such job exists (completed, dead-lettered, or never queued).
+   */
+  getJobByUniqueKey(type: string, uniqueKey: string): Job | null {
+    const row = this.db
+      .query(
+        `SELECT * FROM jobs
+         WHERE type = $type AND unique_key = $uniqueKey
+           AND status IN ('pending', 'processing')
+         LIMIT 1`
+      )
+      .get({ $type: type, $uniqueKey: uniqueKey }) as JobRow | null;
+    return row ? toJob(row) : null;
   }
 
   close(): void {
@@ -651,7 +707,8 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
         $maxRetries: 3,
         $runAt: now,
         $batchId: null,
-        $uniqueKey: null
+        $uniqueKey: null,
+        $backoffConfig: null
       });
     }
 
@@ -665,7 +722,8 @@ export class JobQueue<TMap extends JobMap = Record<string, unknown>> {
         $maxRetries: 3,
         $runAt: now,
         $batchId: null,
-        $uniqueKey: null
+        $uniqueKey: null,
+        $backoffConfig: null
       });
     }
   }

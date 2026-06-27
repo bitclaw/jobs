@@ -58,6 +58,12 @@ export type FailedJob = {
   readonly responseLog: string | null;
 };
 
+export type BackoffConfig = {
+  type: 'exponential' | 'fixed';
+  /** Base delay in ms. Exponential: delayMs * 2^retryCount. Fixed: always delayMs. Max 1h. */
+  delayMs: number;
+};
+
 export type AddJobOptions = {
   priority?: number;
   runAt?: Date;
@@ -69,6 +75,11 @@ export type AddJobOptions = {
    * existing job id is returned. Once the job completes, the same key can be re-used.
    */
   uniqueKey?: string;
+  /**
+   * Backoff strategy for retries. Exponential: delayMs * 2^retryCount, capped at 1h.
+   * Fixed: always delayMs between retries. Default: retry immediately.
+   */
+  backoff?: BackoffConfig;
 };
 
 export type JobContext = {
@@ -89,6 +100,8 @@ export type WorkerOptions<T = unknown> = {
   onError?: (job: Job<T>, error: unknown) => void;
   /** Hard wall-clock limit per job execution in ms. Job is marked failed on timeout. */
   timeoutMs?: number;
+  /** Max concurrent jobs this worker runs simultaneously. Default: 1. */
+  concurrency?: number;
 };
 
 export type JobStats = {
@@ -140,6 +153,7 @@ export type JobRow = {
   request_log: string | null;
   response_log: string | null;
   unique_key: string | null;
+  backoff_config: string | null;
 };
 
 export type FailedJobRow = {
