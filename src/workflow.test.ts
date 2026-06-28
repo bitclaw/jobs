@@ -507,7 +507,9 @@ describe('WorkflowEngine', () => {
       // provision fails permanently → triggers compensation
       const provisionW = queue.createWorker({
         type: 'server:provision',
-        handler: async () => { throw new Error('infra down'); },
+        handler: async () => {
+          throw new Error('infra down');
+        },
         retryIf: () => false,
         pollIntervalMs: 10
       });
@@ -522,7 +524,9 @@ describe('WorkflowEngine', () => {
       // Refund itself fails permanently (dead-letters)
       const refundW = queue.createWorker({
         type: 'payment:refund',
-        handler: async () => { throw new Error('payment gateway down'); },
+        handler: async () => {
+          throw new Error('payment gateway down');
+        },
         retryIf: () => false,
         pollIntervalMs: 10
       });
