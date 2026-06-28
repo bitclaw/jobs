@@ -70,6 +70,25 @@ worker.start()
 
 ---
 
+## Worker Configuration
+
+All options for `queue.createWorker(options)`:
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `type` | `keyof TMap` | required | Job type to process |
+| `handler` | `(job, ctx) => Promise<any>` | required | Job handler |
+| `concurrency` | `number` | `1` | Max parallel jobs per poll tick |
+| `pollIntervalMs` | `number` | `1000` | Poll interval in ms |
+| `leaseMs` | `number` | `300000` | Job lease duration in ms |
+| `timeoutMs` | `number` | — | Per-job timeout; throws if exceeded |
+| `maxRate` | `{ count, windowMs }` | — | Sliding-window rate limit |
+| `aging` | `{ boostPerMinute, maxBoost }` | — | Priority aging config |
+| `retryIf` | `(err, job) => boolean` | — | Return `false` to skip retry |
+| `onError` | `(job, err) => void` | — | Called on every failure (retries + dead) |
+
+---
+
 ## Retries and Backoff
 
 ```typescript
@@ -85,6 +104,18 @@ queue.createWorker({
   handler: async job => { /* ... */ },
   retryIf: (err, job) => !(err instanceof ValidationError)
 })
+
+// Or throw NonRetryableError inside the handler
+import { NonRetryableError } from '@bitclaw/jobs'
+
+queue.createWorker({
+  type: 'email:send',
+  handler: async job => {
+    if (!job.data.to) throw new NonRetryableError('Missing recipient')
+    await sendEmail(job.data)
+  }
+})
+// NonRetryableError bypasses maxRetries and goes directly to failed_jobs
 ```
 
 ---
@@ -119,6 +150,19 @@ queue.createWorker({
   leaseMs: 600_000    // 10 min
 })
 ```
+
+---
+
+## Startup Recovery
+
+Call at startup to reclaim jobs that were mid-processing when the previous instance crashed:
+
+```typescript
+queue.reconcileStaleJobs()          // default: resets jobs claimed > 5 min ago
+queue.reconcileStaleJobs(60_000)    // custom threshold in ms
+```
+
+Pairs with `engine.reconcile()` for workflow executions — both should run on boot.
 
 ---
 
@@ -182,6 +226,18 @@ queue.createWorker({
 
 ---
 
+## Pause / Resume
+
+```typescript
+worker.pause()      // stops claiming new jobs; in-flight job finishes
+worker.resume()     // resumes polling
+worker.isPaused     // boolean
+```
+
+Useful for graceful shutdown, maintenance windows, or circuit-breaker patterns.
+
+---
+
 ## Job Graph API
 
 ```typescript
@@ -224,6 +280,23 @@ queue.createWorker({
 // Read later
 const result = queue.getJobResult<{ count: number; processed: boolean }>(id)
 ```
+
+---
+
+## Webhook on Completion
+
+Fire a POST when a job finishes:
+
+```typescript
+queue.add('report:generate', data, {
+  onComplete: {
+    url: 'https://example.com/hooks/job-done',
+    headers: { 'Authorization': 'Bearer token' }   // optional
+  }
+})
+```
+
+Fire-and-forget (detached). Payload: `{ job: <job object>, result: <handler return value> }`.
 
 ---
 
@@ -407,4 +480,4 @@ Analysis against every actively-maintained SQLite job queue as of 2026-06.
 bun test
 ```
 
-204 tests across 9 files.
+208 tests across 13 files.
