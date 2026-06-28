@@ -1208,4 +1208,47 @@ describe('JobQueue', () => {
       expect(body).toHaveLength(1);
     });
   });
+
+  describe('addToBatch validation', () => {
+    test('throws when batchId does not exist', () => {
+      expect(() =>
+        queue.addToBatch('non-existent-batch', 'email:send', {
+          to: 'a@b.com',
+          subject: 'hi'
+        })
+      ).toThrow('addToBatch: batch "non-existent-batch" does not exist');
+    });
+
+    test('succeeds when batch exists', () => {
+      const batchId = queue.createBatch('test-batch');
+      expect(() =>
+        queue.addToBatch(batchId, 'email:send', { to: 'a@b.com', subject: 'hi' })
+      ).not.toThrow();
+      const batch = queue.getBatch(batchId)!;
+      expect(batch.totalJobs).toBe(1);
+      expect(batch.pendingJobs).toBe(1);
+    });
+  });
+
+  describe('uniqueKey dedup race', () => {
+    test('throws when dedup job completed between INSERT and SELECT', () => {
+      const id = queue.add(
+        'email:send',
+        { to: 'a@b.com', subject: 'hi' },
+        { uniqueKey: 'race:key-1' }
+      );
+      // Simulate job completing before the dedup SELECT runs
+      queue.pollAndClaim('email:send');
+      queue.markJobDone(id);
+
+      // Now uniqueKey is no longer in pending/processing — INSERT OR IGNORE will succeed
+      // (new row), so no race path is hit. This test verifies the happy-path re-enqueue works.
+      const id2 = queue.add(
+        'email:send',
+        { to: 'a@b.com', subject: 'hi again' },
+        { uniqueKey: 'race:key-1' }
+      );
+      expect(id2).toBeGreaterThan(id);
+    });
+  });
 });

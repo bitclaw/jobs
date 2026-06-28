@@ -2,6 +2,8 @@ export type { ParsedCron } from './cron';
 export { cronMatches, nextCronOccurrence, parseCron } from './cron';
 export type { JobQueueEventMap } from './events';
 export { JobQueueEmitter } from './events';
+export type { OtelSpan, OtelTracer } from './otel';
+export { createOtelMiddleware } from './otel';
 export { JobQueue } from './queue';
 export { SlidingWindowRateLimiter } from './rate-limiter';
 export { Scheduler } from './scheduler';

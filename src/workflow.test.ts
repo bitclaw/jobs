@@ -475,6 +475,71 @@ describe('WorkflowEngine', () => {
       expect(engine.getExecution(instanceId)!.status).toBe('failed');
       expect(engine.getExecution(instanceId)!.completedAt).not.toBeNull();
     });
+
+    test('marks failed when compensation job itself dead-letters', async () => {
+      // charge succeeds → provision fails → refund enqueued → refund exhausts retries → dead-letter
+      // Workflow should still transition to 'failed', not stay stuck in 'compensating'
+      const { instanceId } = engine
+        .workflow('comp-dead-saga')
+        .step('charge', 'payment:charge', { amount: 100 })
+        .step(
+          'provision',
+          'server:provision',
+          { serverId: 'srv-dead' },
+          { dependsOn: ['charge'] }
+        )
+        .onFail('charge', {
+          compensate: 'payment:refund',
+          compensateData: { amount: 100, reason: 'rollback' }
+        })
+        .run();
+
+      // charge succeeds
+      const chargeW = queue.createWorker({
+        type: 'payment:charge',
+        handler: async () => {},
+        pollIntervalMs: 10
+      });
+      chargeW.start();
+      await sleep(100);
+      await chargeW.stop();
+
+      // provision fails permanently → triggers compensation
+      const provisionW = queue.createWorker({
+        type: 'server:provision',
+        handler: async () => { throw new Error('infra down'); },
+        retryIf: () => false,
+        pollIntervalMs: 10
+      });
+      provisionW.start();
+      await sleep(100);
+      await provisionW.stop();
+
+      // First reconcile: enqueue refund compensation job
+      engine.reconcile();
+      expect(engine.getExecution(instanceId)!.status).toBe('compensating');
+
+      // Refund itself fails permanently (dead-letters)
+      const refundW = queue.createWorker({
+        type: 'payment:refund',
+        handler: async () => { throw new Error('payment gateway down'); },
+        retryIf: () => false,
+        pollIntervalMs: 10
+      });
+      refundW.start();
+      await sleep(100);
+      await refundW.stop();
+
+      // Refund is now in failed_jobs (dead-lettered)
+      const failedJobs = queue.getFailedJobs({ type: 'payment:refund' });
+      expect(failedJobs.items).toHaveLength(1);
+
+      // Second reconcile: compensation job dead-lettered → execution must transition to 'failed'
+      const result = engine.reconcile();
+      expect(result.failed).toBe(1);
+      expect(engine.getExecution(instanceId)!.status).toBe('failed');
+      expect(engine.getExecution(instanceId)!.completedAt).not.toBeNull();
+    });
   });
 
   describe('topological ordering', () => {

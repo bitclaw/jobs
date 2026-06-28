@@ -650,6 +650,11 @@ export class JobQueue<
     data: TMap[K],
     options?: AddJobOptions
   ): number {
+    const batchExists = this.db
+      .query('SELECT id FROM job_batches WHERE id = ? LIMIT 1')
+      .get(batchId);
+    if (!batchExists) throw new Error(`addToBatch: batch "${batchId}" does not exist`);
+
     const jobId = this.insertJob(type, data, batchId, options);
 
     this.db
@@ -737,7 +742,12 @@ export class JobQueue<
         $type: type,
         $uniqueKey: options.uniqueKey
       }) as { id: number } | null;
-      return existing?.id ?? 0;
+      if (!existing) {
+        throw new Error(
+          `uniqueKey dedup race: job type="${type}" key="${options.uniqueKey}" completed between INSERT and SELECT`
+        );
+      }
+      return existing.id;
     }
 
     const jobId = this.lastInsertRowIdStmt.get() as { id: number };

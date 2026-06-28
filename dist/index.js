@@ -2,6 +2,7 @@
 // Barrel export for @bitclaw/jobs
 export { cronMatches, nextCronOccurrence, parseCron } from './cron';
 export { JobQueueEmitter } from './events';
+export { createOtelMiddleware } from './otel';
 export { JobQueue } from './queue';
 export { SlidingWindowRateLimiter } from './rate-limiter';
 export { Scheduler } from './scheduler';
