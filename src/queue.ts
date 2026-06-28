@@ -653,7 +653,8 @@ export class JobQueue<
     const batchExists = this.db
       .query('SELECT id FROM job_batches WHERE id = ? LIMIT 1')
       .get(batchId);
-    if (!batchExists) throw new Error(`addToBatch: batch "${batchId}" does not exist`);
+    if (!batchExists)
+      throw new Error(`addToBatch: batch "${batchId}" does not exist`);
 
     const jobId = this.insertJob(type, data, batchId, options);
 

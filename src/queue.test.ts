@@ -1222,7 +1222,10 @@ describe('JobQueue', () => {
     test('succeeds when batch exists', () => {
       const batchId = queue.createBatch('test-batch');
       expect(() =>
-        queue.addToBatch(batchId, 'email:send', { to: 'a@b.com', subject: 'hi' })
+        queue.addToBatch(batchId, 'email:send', {
+          to: 'a@b.com',
+          subject: 'hi'
+        })
       ).not.toThrow();
       const batch = queue.getBatch(batchId)!;
       expect(batch.totalJobs).toBe(1);
