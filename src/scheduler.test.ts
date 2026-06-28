@@ -68,7 +68,7 @@ describe('Scheduler', () => {
       scheduler.register('cleanup', 'data:cleanup', '0 * * * *');
       const first = scheduler.getSchedule('cleanup')!;
 
-      // Re-register with same cron — next_run_at should be preserved
+      // Re-register with same cron , next_run_at should be preserved
       scheduler.register('cleanup', 'data:cleanup', '0 * * * *', {
         data: {},
         maxRetries: 5

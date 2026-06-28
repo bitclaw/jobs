@@ -135,7 +135,7 @@ export function applyPragmas(db: Database): void {
   db.run('PRAGMA synchronous = NORMAL');
   db.run('PRAGMA cache_size = -4000');
   db.run('PRAGMA temp_store = MEMORY');
-  db.run('PRAGMA mmap_size = 16777216'); // 16MB — jobs rows are small, no blobs
+  db.run('PRAGMA mmap_size = 16777216'); // 16MB , jobs rows are small, no blobs
   db.run('PRAGMA wal_autocheckpoint = 0'); // Litestream controls checkpointing
 }
 

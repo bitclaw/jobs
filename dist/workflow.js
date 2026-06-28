@@ -164,7 +164,16 @@ export class WorkflowEngine {
                 if (!s.compensate_job_id)
                     return false;
                 const job = this.queue.getJob(s.compensate_job_id);
-                return job !== null && job.status !== 'done';
+                if (job !== null)
+                    return job.status !== 'done';
+                // job removed from jobs table — check if it dead-lettered (permanent failure)
+                const dead = this.queue.db
+                    .query('SELECT id FROM failed_jobs WHERE original_job_id = ? LIMIT 1')
+                    .get(s.compensate_job_id);
+                if (dead !== null) {
+                    console.warn('[workflow] compensation job dead-lettered: exec=%s step=%s compensate_job_id=%d', exec.id, s.step_name, s.compensate_job_id);
+                }
+                return false; // removed from jobs table (done or dead) → not pending
             });
             if (pendingComp.length === 0) {
                 this.queue.db.run("UPDATE workflow_executions SET status = 'failed', completed_at = ? WHERE id = ?", [nowISO(), exec.id]);

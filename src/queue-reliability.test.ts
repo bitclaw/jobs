@@ -57,7 +57,7 @@ describe('JobQueue', () => {
         .run();
 
       const count = queue.reconcileStaleJobs(300_000);
-      expect(count).toBe(0); // id2 is pending, id1 is done — neither resets
+      expect(count).toBe(0); // id2 is pending, id1 is done , neither resets
 
       expect(queue.getJob(id2)!.status).toBe('pending');
     });

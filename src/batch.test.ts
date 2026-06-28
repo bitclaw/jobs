@@ -187,7 +187,7 @@ describe('Job Batches', () => {
     queue.markJobFailed(jobId, 'transient error');
 
     const batch = queue.getBatch(batchId)!;
-    // Still pending — job is retrying, not dead
+    // Still pending , job is retrying, not dead
     expect(batch.pendingJobs).toBe(1);
     expect(batch.failedJobs).toBe(0);
   });

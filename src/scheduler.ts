@@ -1,5 +1,5 @@
 // packages/jobs/src/scheduler.ts
-// Cron scheduler — hybrid register/upsert pattern for recurring jobs
+// Cron scheduler , hybrid register/upsert pattern for recurring jobs
 
 import { nextCronOccurrence, parseCron } from './cron';
 import type { JobQueue } from './queue';
