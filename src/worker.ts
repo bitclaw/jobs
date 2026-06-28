@@ -1,5 +1,5 @@
 // packages/jobs/src/worker.ts
-// JobWorker — setTimeout-based poll loop with graceful shutdown
+// JobWorker , setTimeout-based poll loop with graceful shutdown
 import type { JobQueue } from './queue';
 import { SlidingWindowRateLimiter } from './rate-limiter';
 import type {

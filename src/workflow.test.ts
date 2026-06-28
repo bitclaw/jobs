@@ -95,7 +95,7 @@ describe('WorkflowEngine', () => {
       expect(engine.getExecution('my-custom-id')!.id).toBe('my-custom-id');
     });
 
-    test('three-step linear chain — correct dep structure', () => {
+    test('three-step linear chain , correct dep structure', () => {
       const { jobIds } = engine
         .workflow('chain-flow')
         .step('charge', 'payment:charge', { amount: 200 })
@@ -140,7 +140,7 @@ describe('WorkflowEngine', () => {
         })
         .run();
 
-      // Compensation not yet enqueued — no step has failed yet
+      // Compensation not yet enqueued , no step has failed yet
       expect(queue.getJob(jobIds.charge)!.status).toBe('pending');
       expect(engine.getExecution(instanceId)!.status).toBe('running');
     });
@@ -255,7 +255,7 @@ describe('WorkflowEngine', () => {
     });
   });
 
-  describe('reconcile — completion', () => {
+  describe('reconcile , completion', () => {
     test('marks execution completed when all step jobs done', async () => {
       const { instanceId, jobIds } = engine
         .workflow('complete-flow')
@@ -332,7 +332,7 @@ describe('WorkflowEngine', () => {
     });
   });
 
-  describe('reconcile — saga compensation', () => {
+  describe('reconcile , saga compensation', () => {
     // Saga semantics: compensation runs for COMPLETED steps when a LATER step fails.
     // If charge succeeds and provision (which depends on charge) fails,
     // then the refund (compensation for charge) is triggered.

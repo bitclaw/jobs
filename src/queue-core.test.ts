@@ -201,12 +201,12 @@ describe('JobQueue', () => {
 
       expect(queue.getJob(blocked)!.status).toBe('blocked');
 
-      // Complete dep1 — still blocked
+      // Complete dep1 , still blocked
       queue.pollAndClaim('email:send');
       queue.markJobDone(dep1);
       expect(queue.getJob(blocked)!.status).toBe('blocked');
 
-      // Complete dep2 — now unblocked
+      // Complete dep2 , now unblocked
       queue.pollAndClaim('email:send');
       queue.markJobDone(dep2);
       expect(queue.getJob(blocked)!.status).toBe('pending');

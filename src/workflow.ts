@@ -143,7 +143,7 @@ export class WorkflowBuilder<
           const depId = jobIds[depName];
           if (depId === undefined)
             throw new Error(
-              `Step '${depName}' not enqueued yet — check dependsOn`
+              `Step '${depName}' not enqueued yet , check dependsOn`
             );
           return depId;
         });
@@ -289,7 +289,7 @@ export class WorkflowEngine<TMap extends JobMap> {
         if (!s.compensate_job_id) return false;
         const job = this.queue.getJob(s.compensate_job_id);
         if (job !== null) return job.status !== 'done';
-        // job removed from jobs table — check if it dead-lettered (permanent failure)
+        // job removed from jobs table , check if it dead-lettered (permanent failure)
         const dead = this.queue.db
           .query('SELECT id FROM failed_jobs WHERE original_job_id = ? LIMIT 1')
           .get(s.compensate_job_id) as { id: number } | null;
@@ -317,7 +317,7 @@ export class WorkflowEngine<TMap extends JobMap> {
     const stepStatuses = steps.map(step => {
       const job = this.queue.getJob(step.job_id);
       if (!job) {
-        // Job deleted from jobs table — check failed_jobs
+        // Job deleted from jobs table , check failed_jobs
         const dead = this.queue.db
           .query('SELECT id FROM failed_jobs WHERE original_job_id = ? LIMIT 1')
           .get(step.job_id) as { id: number } | null;
@@ -357,7 +357,7 @@ export class WorkflowEngine<TMap extends JobMap> {
           }
           stats.compensated++;
         } else {
-          // No compensation needed — immediately fail
+          // No compensation needed , immediately fail
           this.queue.db.run(
             "UPDATE workflow_executions SET status = 'failed', completed_at = ? WHERE id = ?",
             [nowISO(), exec.id]

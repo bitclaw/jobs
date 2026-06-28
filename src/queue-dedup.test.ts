@@ -147,7 +147,7 @@ describe('JobQueue', () => {
       queue.pollAndClaim('email:send');
       queue.markJobDone(id);
 
-      // Now uniqueKey is no longer in pending/processing — INSERT OR IGNORE will succeed
+      // Now uniqueKey is no longer in pending/processing , INSERT OR IGNORE will succeed
       // (new row), so no race path is hit. This test verifies the happy-path re-enqueue works.
       const id2 = queue.add(
         'email:send',

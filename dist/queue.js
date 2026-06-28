@@ -526,6 +526,11 @@ export class JobQueue extends JobQueueEmitter {
         return id;
     }
     addToBatch(batchId, type, data, options) {
+        const batchExists = this.db
+            .query('SELECT id FROM job_batches WHERE id = ? LIMIT 1')
+            .get(batchId);
+        if (!batchExists)
+            throw new Error(`addToBatch: batch "${batchId}" does not exist`);
         const jobId = this.insertJob(type, data, batchId, options);
         this.db
             .query('UPDATE job_batches SET total_jobs = total_jobs + 1, pending_jobs = pending_jobs + 1 WHERE id = $id')
@@ -593,7 +598,10 @@ export class JobQueue extends JobQueueEmitter {
                 $type: type,
                 $uniqueKey: options.uniqueKey
             });
-            return existing?.id ?? 0;
+            if (!existing) {
+                throw new Error(`uniqueKey dedup race: job type="${type}" key="${options.uniqueKey}" completed between INSERT and SELECT`);
+            }
+            return existing.id;
         }
         const jobId = this.lastInsertRowIdStmt.get();
         if (hasDeps) {

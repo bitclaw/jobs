@@ -1,5 +1,5 @@
 // packages/jobs/src/queue.ts
-// JobQueue — SQLite-backed job queue with typed payloads and dependency support
+// JobQueue , SQLite-backed job queue with typed payloads and dependency support
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -427,7 +427,7 @@ export class JobQueue<
         });
         this.stmts.deleteJob.run({ $id: id });
 
-        // Job is permanently dead — decrement batch counter and track failure
+        // Job is permanently dead , decrement batch counter and track failure
         if (row.batch_id) {
           this.stmts.incrementBatchFailed.run({
             $id: row.batch_id,
@@ -653,7 +653,7 @@ export class JobQueue<
       .query(
         `UPDATE jobs
          SET status = 'pending',
-             error = 'stale: worker crash or restart — reset for retry',
+             error = 'stale: worker crash or restart , reset for retry',
              updated_at = $now
          WHERE status = 'processing' AND updated_at < $cutoff`
       )

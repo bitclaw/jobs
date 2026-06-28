@@ -8,13 +8,13 @@ SQLite-backed background job queue for Bun. Typed generics, multi-process lease 
 bun add @bitclaw/jobs
 ```
 
-Requires Bun ≥ 1.3.0. Uses `bun:sqlite` — no native build step, no extra packages.
+Requires Bun ≥ 1.3.0. Uses `bun:sqlite` , no native build step, no extra packages.
 
 ## Feature Overview
 
 | Feature | Details |
 |---|---|
-| **Typed payloads** | `JobQueue<TMap>` — per-type payload inference, no `any` |
+| **Typed payloads** | `JobQueue<TMap>` , per-type payload inference, no `any` |
 | **Priority + aging** | Jobs ordered by priority DESC; workers can boost old jobs per minute |
 | **Retries + backoff** | `exponential`, `fixed`, `jitter`, `fibonacci`; `retryIf` predicate to skip retries |
 | **Dead-letter** | Exhausted jobs moved to `failed_jobs`, retryable via `retryFailedJob` |
@@ -26,15 +26,15 @@ Requires Bun ≥ 1.3.0. Uses `bun:sqlite` — no native build step, no extra pac
 | **Rate limiter** | Per-worker sliding-window throttle (`maxRate`) |
 | **Middleware** | Onion-style `queue.use(fn)` wraps all executions (logging, OTel, timing) |
 | **Job graph API** | `getJobGraph(id)` traverses dependency DAG via recursive CTE |
-| **Dedup** | `uniqueKey` + `dedup: 'ignore' | 'replace'` — state-aware, key reusable after completion |
-| **TTL** | `expireAt` — expired jobs silently skipped and purgeable |
+| **Dedup** | `uniqueKey` + `dedup: 'ignore' | 'replace'` , state-aware, key reusable after completion |
+| **TTL** | `expireAt` , expired jobs silently skipped and purgeable |
 | **Result storage** | Handler return value persisted; `getJobResult<T>(id)` to read it |
 | **Webhook on completion** | `onComplete: { url }` fires a detached POST after job finishes |
 | **Typed events** | `queue.on('job:done' | 'job:failed' | 'job:dead' | ...)` |
-| **Pause / resume** | `worker.pause()` / `worker.resume()` — in-flight job finishes, no new claims |
+| **Pause / resume** | `worker.pause()` / `worker.resume()` , in-flight job finishes, no new claims |
 | **Admin handler** | `queue.mountAdminHandler()` returns a zero-dep `Request → Response` handler |
-| **Workflow engine** | `WorkflowEngine` — typed DAG of steps, saga compensation, restart-safe `reconcile()` |
-| **OpenTelemetry** | `createOtelMiddleware(tracer)` — zero-dep, structural tracer interface |
+| **Workflow engine** | `WorkflowEngine` , typed DAG of steps, saga compensation, restart-safe `reconcile()` |
+| **OpenTelemetry** | `createOtelMiddleware(tracer)` , zero-dep, structural tracer interface |
 
 ---
 
@@ -81,11 +81,11 @@ All options for `queue.createWorker(options)`:
 | `concurrency` | `number` | `1` | Max parallel jobs per poll tick |
 | `pollIntervalMs` | `number` | `1000` | Poll interval in ms |
 | `leaseMs` | `number` | `300000` | Job lease duration in ms |
-| `timeoutMs` | `number` | — | Per-job timeout; throws if exceeded |
-| `maxRate` | `{ count, windowMs }` | — | Sliding-window rate limit |
-| `aging` | `{ boostPerMinute, maxBoost }` | — | Priority aging config |
-| `retryIf` | `(err, job) => boolean` | — | Return `false` to skip retry |
-| `onError` | `(job, err) => void` | — | Called on every failure (retries + dead) |
+| `timeoutMs` | `number` | , | Per-job timeout; throws if exceeded |
+| `maxRate` | `{ count, windowMs }` | , | Sliding-window rate limit |
+| `aging` | `{ boostPerMinute, maxBoost }` | , | Priority aging config |
+| `retryIf` | `(err, job) => boolean` | , | Return `false` to skip retry |
+| `onError` | `(job, err) => void` | , | Called on every failure (retries + dead) |
 
 ---
 
@@ -162,7 +162,7 @@ queue.reconcileStaleJobs()          // default: resets jobs claimed > 5 min ago
 queue.reconcileStaleJobs(60_000)    // custom threshold in ms
 ```
 
-Pairs with `engine.reconcile()` for workflow executions — both should run on boot.
+Pairs with `engine.reconcile()` for workflow executions , both should run on boot.
 
 ---
 
@@ -187,7 +187,7 @@ queue.use(loggingMiddleware)
 
 ## OpenTelemetry
 
-No peer dependency. Pass any OTel-compatible tracer — the interface is structural.
+No peer dependency. Pass any OTel-compatible tracer , the interface is structural.
 
 ```typescript
 import { trace } from '@opentelemetry/api'
@@ -269,7 +269,7 @@ queue.cancelByUniqueKey('report:generate', 'daily-2026-06-27')
 ```typescript
 const id = queue.add('data:process', payload)
 
-// In handler — return value is stored automatically
+// In handler , return value is stored automatically
 queue.createWorker({
   type: 'data:process',
   handler: async job => {
@@ -317,7 +317,7 @@ unsub()   // remove listener
 
 ## Workflow Engine
 
-Typed DAG of steps where each step is a real job. Dependencies handled by the existing `job_dependencies` mechanism — no separate scheduler. Saga compensation runs in reverse topological order if any step fails permanently.
+Typed DAG of steps where each step is a real job. Dependencies handled by the existing `job_dependencies` mechanism , no separate scheduler. Saga compensation runs in reverse topological order if any step fails permanently.
 
 ```typescript
 import { WorkflowEngine } from '@bitclaw/jobs'
@@ -335,7 +335,7 @@ const { instanceId, jobIds } = engine
   })
   .run()
 
-// Reconcile on startup — resumes any interrupted workflows
+// Reconcile on startup , resumes any interrupted workflows
 engine.reconcile()
 
 // Read a step's result from within a dependent handler
@@ -350,7 +350,7 @@ engine.getExecution(instanceId)
 
 **Restart safety:** Call `engine.reconcile()` on boot. It finds all `running`/`compensating` executions and advances their state without re-running completed steps.
 
-**Compensation failure:** If a compensation job exhausts its retry attempts, it moves to the `failed_jobs` table. The execution transitions to `'failed'` — it is never silently marked complete. To observe: query `job_executions WHERE status = 'failed'` to find affected executions, then `failed_jobs WHERE original_job_id = ?` with each step's `compensate_job_id` to inspect the dead-lettered compensation job.
+**Compensation failure:** If a compensation job exhausts its retry attempts, it moves to the `failed_jobs` table. The execution transitions to `'failed'` , it is never silently marked complete. To observe: query `job_executions WHERE status = 'failed'` to find affected executions, then `failed_jobs WHERE original_job_id = ?` with each step's `compensate_job_id` to inspect the dead-lettered compensation job.
 
 ---
 
@@ -469,8 +469,8 @@ Analysis against every actively-maintained SQLite job queue as of 2026-06.
 - **Only queue with lease renewal.** Long-running jobs (provisioning, ML inference) can extend their claim without crashing. Competitors force you to size `leaseMs` conservatively.
 - **Only queue with priority aging.** High-throughput workloads can starve low-priority jobs indefinitely. Aging prevents it.
 - **Only queue with `retryIf`.** Permanent errors (bad config, invalid input) should not consume retry budget. All others retry blindly.
-- **Job graph API.** `getJobGraph(id)` returns the full dependency graph via recursive CTE — useful for admin UIs and debugging complex pipelines. No competitor exposes this.
-- **OTel helper.** `createOtelMiddleware(tracer)` instruments all job executions with zero library coupling. No peer dependency — the tracer interface is structural.
+- **Job graph API.** `getJobGraph(id)` returns the full dependency graph via recursive CTE , useful for admin UIs and debugging complex pipelines. No competitor exposes this.
+- **OTel helper.** `createOtelMiddleware(tracer)` instruments all job executions with zero library coupling. No peer dependency , the tracer interface is structural.
 
 ---
 
