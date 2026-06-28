@@ -277,6 +277,8 @@ engine.getExecution(instanceId)
 
 **Restart safety:** Call `engine.reconcile()` on boot. It finds all `running`/`compensating` executions and advances their state without re-running completed steps.
 
+**Compensation failure:** If a compensation job exhausts its retry attempts, it moves to the `failed_jobs` table. The execution transitions to `'failed'` — it is never silently marked complete. To observe: query `job_executions WHERE status = 'failed'` to find affected executions, then `failed_jobs WHERE original_job_id = ?` with each step's `compensate_job_id` to inspect the dead-lettered compensation job.
+
 ---
 
 ## Cron Scheduler
