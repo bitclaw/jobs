@@ -1,10 +1,12 @@
 // packages/jobs/src/queue.ts
-// JobQueue — SQLite-backed job queue with typed payloads and dependency support
+// JobQueue , SQLite-backed job queue with typed payloads and dependency support
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { createAdminHandler } from './admin';
 import { JobQueueEmitter } from './events';
 import { applyPragmas, initializeSchema } from './schema';
+import { createStatements } from './statements';
 import { nowISO } from './utils';
 import { JobWorker } from './worker';
 function toJob(row) {
@@ -64,144 +66,25 @@ function toFailedJob(row) {
 export class JobQueue extends JobQueueEmitter {
     db;
     middlewares = [];
-    insertJobStmt;
-    selectDedupedJobStmt;
-    insertDepStmt;
-    selectJobStmt;
-    selectPendingStmt;
-    markProcessingStmt;
-    markDoneStmt;
-    markFailedStmt;
-    updateProgressStmt;
-    selectStatsStmt;
-    countFailedStmt;
-    insertFailedJobStmt;
-    deleteJobStmt;
-    selectDependentsStmt;
-    countUnmetDepsStmt;
-    unblockJobStmt;
-    lastInsertRowIdStmt;
-    renewLeaseStmt;
-    // Batch statements
-    insertBatchStmt;
-    selectBatchStmt;
-    decrementBatchPendingStmt;
-    incrementBatchFailedStmt;
-    finishBatchStmt;
-    cancelBatchStmt;
-    cancelBatchJobsStmt;
+    stmts;
     constructor(dbPath) {
         super();
         mkdirSync(dirname(dbPath), { recursive: true });
         this.db = new Database(dbPath, { create: true });
         applyPragmas(this.db);
         initializeSchema(this.db);
-        this.insertJobStmt = this.db.query(`
-      INSERT OR IGNORE INTO jobs (type, data, status, priority, max_retries, run_at, batch_id, unique_key, backoff_config, expire_at, webhook_config)
-      VALUES ($type, $data, $status, $priority, $maxRetries, $runAt, $batchId, $uniqueKey, $backoffConfig, $expireAt, $webhookConfig)
-    `);
-        this.selectDedupedJobStmt = this.db.query(`
-      SELECT id FROM jobs
-      WHERE type = $type AND unique_key = $uniqueKey
-        AND status IN ('pending', 'processing')
-      LIMIT 1
-    `);
-        this.insertDepStmt = this.db.query(`
-      INSERT INTO job_dependencies (job_id, depends_on_id) VALUES ($jobId, $depsOnId)
-    `);
-        this.selectJobStmt = this.db.query('SELECT * FROM jobs WHERE id = $id');
-        this.selectPendingStmt = this.db.query(`
-      SELECT * FROM jobs
-      WHERE type = $type AND run_at <= $now
-        AND (expire_at IS NULL OR expire_at > $now)
-        AND (
-          (status = 'pending')
-          OR (status = 'processing' AND claimed_until IS NOT NULL AND claimed_until < $now)
-        )
-      ORDER BY priority DESC, created_at ASC
-      LIMIT 1
-    `);
-        this.markProcessingStmt = this.db.query(`
-      UPDATE jobs SET status = 'processing', started_at = $now, updated_at = $now, claimed_until = $claimedUntil
-      WHERE id = $id
-    `);
-        this.markDoneStmt = this.db.query(`
-      UPDATE jobs SET status = 'done', completed_at = $now, updated_at = $now, progress = 100, result = $result
-      WHERE id = $id
-    `);
-        this.markFailedStmt = this.db.query(`
-      UPDATE jobs
-      SET status = 'pending',
-          retry_count = retry_count + 1,
-          error = $error,
-          run_at = $runAt,
-          updated_at = $now
-      WHERE id = $id
-    `);
-        this.updateProgressStmt = this.db.query(`
-      UPDATE jobs SET progress = $progress, updated_at = $now WHERE id = $id
-    `);
-        this.selectStatsStmt = this.db.query('SELECT status, COUNT(*) as count FROM jobs GROUP BY status');
-        this.countFailedStmt = this.db.query('SELECT COUNT(*) as count FROM failed_jobs');
-        this.insertFailedJobStmt = this.db.query(`
-      INSERT INTO failed_jobs (original_job_id, type, data, error, retry_count, max_retries, created_at, request_log, response_log)
-      VALUES ($originalJobId, $type, $data, $error, $retryCount, $maxRetries, $createdAt, $requestLog, $responseLog)
-    `);
-        this.deleteJobStmt = this.db.query('DELETE FROM jobs WHERE id = $id');
-        this.selectDependentsStmt = this.db.query(`
-      SELECT job_id FROM job_dependencies WHERE depends_on_id = $depsOnId
-    `);
-        this.countUnmetDepsStmt = this.db.query(`
-      SELECT COUNT(*) as count FROM job_dependencies jd
-      JOIN jobs j ON jd.depends_on_id = j.id
-      WHERE jd.job_id = $jobId AND j.status != 'done'
-    `);
-        this.unblockJobStmt = this.db.query(`
-      UPDATE jobs SET status = 'pending', updated_at = $now
-      WHERE id = $id AND status = 'blocked'
-    `);
-        this.lastInsertRowIdStmt = this.db.query('SELECT last_insert_rowid() as id');
-        this.renewLeaseStmt = this.db.query(`
-      UPDATE jobs SET claimed_until = $claimedUntil, updated_at = $now
-      WHERE id = $id AND status = 'processing'
-    `);
-        // Batch statements
-        this.insertBatchStmt = this.db.query(`
-      INSERT INTO job_batches (id, name, options, created_at)
-      VALUES ($id, $name, $options, $createdAt)
-    `);
-        this.selectBatchStmt = this.db.query('SELECT * FROM job_batches WHERE id = $id');
-        this.decrementBatchPendingStmt = this.db.query(`
-      UPDATE job_batches SET pending_jobs = pending_jobs - 1
-      WHERE id = $id
-    `);
-        this.incrementBatchFailedStmt = this.db.query(`
-      UPDATE job_batches
-      SET failed_jobs = failed_jobs + 1,
-          failed_job_ids = json_insert(failed_job_ids, '$[#]', $jobId)
-      WHERE id = $id
-    `);
-        this.finishBatchStmt = this.db.query(`
-      UPDATE job_batches SET finished_at = $now WHERE id = $id
-    `);
-        this.cancelBatchStmt = this.db.query(`
-      UPDATE job_batches SET cancelled_at = $now WHERE id = $id
-    `);
-        this.cancelBatchJobsStmt = this.db.query(`
-      UPDATE jobs SET status = 'cancelled', updated_at = $now
-      WHERE batch_id = $batchId AND status IN ('pending', 'blocked')
-    `);
+        this.stmts = createStatements(this.db);
     }
     add(type, data, options) {
         return this.insertJob(type, data, null, options);
     }
     getJob(id) {
-        const row = this.selectJobStmt.get({ $id: id });
+        const row = this.stmts.selectJob.get({ $id: id });
         return row ? toJob(row) : null;
     }
     getStats() {
-        const rows = this.selectStatsStmt.all();
-        const deadRow = this.countFailedStmt.get();
+        const rows = this.stmts.selectStats.all();
+        const deadRow = this.stmts.countFailed.get();
         const stats = {
             pending: 0,
             blocked: 0,
@@ -240,7 +123,7 @@ export class JobQueue extends JobQueueEmitter {
             rows = this.db
                 .query('SELECT * FROM failed_jobs ORDER BY failed_at DESC LIMIT $limit OFFSET $offset')
                 .all({ $limit: limit, $offset: offset });
-            total = this.countFailedStmt.get().count;
+            total = this.stmts.countFailed.get().count;
         }
         return { items: rows.map(toFailedJob), total };
     }
@@ -297,7 +180,7 @@ export class JobQueue extends JobQueueEmitter {
             throw new Error(`Failed job ${failedJobId} not found`);
         }
         const now = nowISO();
-        this.insertJobStmt.run({
+        this.stmts.insertJob.run({
             $type: row.type,
             $data: row.data,
             $status: 'pending',
@@ -310,7 +193,7 @@ export class JobQueue extends JobQueueEmitter {
             $expireAt: null,
             $webhookConfig: null
         });
-        const newJobId = this.lastInsertRowIdStmt.get();
+        const newJobId = this.stmts.lastInsertRowId.get();
         this.db
             .query('DELETE FROM failed_jobs WHERE id = $id')
             .run({ $id: failedJobId });
@@ -334,13 +217,13 @@ export class JobQueue extends JobQueueEmitter {
         const now = nowISO();
         const claimedUntil = new Date(Date.now() + leaseMs).toISOString();
         const claimTx = this.db.transaction(() => {
-            const row = this.selectPendingStmt.get({
+            const row = this.stmts.selectPending.get({
                 $type: type,
                 $now: now
             });
             if (!row)
                 return null;
-            this.markProcessingStmt.run({
+            this.stmts.markProcessing.run({
                 $id: row.id,
                 $now: now,
                 $claimedUntil: claimedUntil
@@ -352,7 +235,7 @@ export class JobQueue extends JobQueueEmitter {
     }
     renewLease(id, leaseMs) {
         const claimedUntil = new Date(Date.now() + leaseMs).toISOString();
-        this.renewLeaseStmt.run({
+        this.stmts.renewLease.run({
             $id: id,
             $claimedUntil: claimedUntil,
             $now: nowISO()
@@ -364,7 +247,7 @@ export class JobQueue extends JobQueueEmitter {
         const wh = { config: null };
         this.db.transaction(() => {
             const now = nowISO();
-            const row = this.selectJobStmt.get({ $id: id });
+            const row = this.stmts.selectJob.get({ $id: id });
             if (row?.webhook_config) {
                 try {
                     wh.config = JSON.parse(row.webhook_config);
@@ -373,7 +256,7 @@ export class JobQueue extends JobQueueEmitter {
                     // ignore malformed config
                 }
             }
-            this.markDoneStmt.run({
+            this.stmts.markDone.run({
                 $id: id,
                 $now: now,
                 $result: result !== undefined ? JSON.stringify(result) : null
@@ -382,7 +265,7 @@ export class JobQueue extends JobQueueEmitter {
             if (row?.batch_id) {
                 this.handleBatchJobComplete(row.batch_id);
             }
-            const updatedRow = this.selectJobStmt.get({ $id: id });
+            const updatedRow = this.stmts.selectJob.get({ $id: id });
             if (updatedRow)
                 doneJob = toJob(updatedRow);
         })();
@@ -401,12 +284,12 @@ export class JobQueue extends JobQueueEmitter {
     markJobDead(id, error) {
         let deadJob = null;
         this.db.transaction(() => {
-            const row = this.selectJobStmt.get({ $id: id });
+            const row = this.stmts.selectJob.get({ $id: id });
             if (!row)
                 return;
             // capture before delete
             deadJob = toJob(row);
-            this.insertFailedJobStmt.run({
+            this.stmts.insertFailedJob.run({
                 $originalJobId: row.id,
                 $type: row.type,
                 $data: row.data,
@@ -417,9 +300,9 @@ export class JobQueue extends JobQueueEmitter {
                 $requestLog: row.request_log,
                 $responseLog: row.response_log
             });
-            this.deleteJobStmt.run({ $id: id });
+            this.stmts.deleteJob.run({ $id: id });
             if (row.batch_id) {
-                this.incrementBatchFailedStmt.run({
+                this.stmts.incrementBatchFailed.run({
                     $id: row.batch_id,
                     $jobId: row.id
                 });
@@ -433,11 +316,11 @@ export class JobQueue extends JobQueueEmitter {
         let failedJob = null;
         this.db.transaction(() => {
             const now = nowISO();
-            const row = this.selectJobStmt.get({ $id: id });
+            const row = this.stmts.selectJob.get({ $id: id });
             if (!row)
                 return;
             if (row.retry_count + 1 >= row.max_retries) {
-                this.insertFailedJobStmt.run({
+                this.stmts.insertFailedJob.run({
                     $originalJobId: row.id,
                     $type: row.type,
                     $data: row.data,
@@ -448,10 +331,10 @@ export class JobQueue extends JobQueueEmitter {
                     $requestLog: row.request_log,
                     $responseLog: row.response_log
                 });
-                this.deleteJobStmt.run({ $id: id });
-                // Job is permanently dead — decrement batch counter and track failure
+                this.stmts.deleteJob.run({ $id: id });
+                // Job is permanently dead , decrement batch counter and track failure
                 if (row.batch_id) {
-                    this.incrementBatchFailedStmt.run({
+                    this.stmts.incrementBatchFailed.run({
                         $id: row.batch_id,
                         $jobId: row.id
                     });
@@ -480,14 +363,16 @@ export class JobQueue extends JobQueueEmitter {
                     }
                     retryRunAt = new Date(Date.now() + delayMs).toISOString();
                 }
-                this.markFailedStmt.run({
+                this.stmts.markFailed.run({
                     $id: id,
                     $error: error,
                     $runAt: retryRunAt,
                     $now: now
                 });
                 // capture updated job for post-tx emit
-                const updatedRow = this.selectJobStmt.get({ $id: id });
+                const updatedRow = this.stmts.selectJob.get({
+                    $id: id
+                });
                 if (updatedRow)
                     failedJob = toJob(updatedRow);
             }
@@ -505,19 +390,19 @@ export class JobQueue extends JobQueueEmitter {
         return b;
     }
     updateProgress(id, progress) {
-        this.updateProgressStmt.run({
+        this.stmts.updateProgress.run({
             $id: id,
             $progress: progress,
             $now: nowISO()
         });
-        const row = this.selectJobStmt.get({ $id: id });
+        const row = this.stmts.selectJob.get({ $id: id });
         if (row)
             this.emit('job:progress', toJob(row), progress);
     }
     // --- Batch API ---
     createBatch(name, options) {
         const id = crypto.randomUUID();
-        this.insertBatchStmt.run({
+        this.stmts.insertBatch.run({
             $id: id,
             $name: name,
             $options: options ? JSON.stringify(options) : null,
@@ -538,15 +423,15 @@ export class JobQueue extends JobQueueEmitter {
         return jobId;
     }
     getBatch(batchId) {
-        const row = this.selectBatchStmt.get({
+        const row = this.stmts.selectBatch.get({
             $id: batchId
         });
         return row ? toBatch(row) : null;
     }
     cancelBatch(batchId) {
         const now = nowISO();
-        this.cancelBatchStmt.run({ $id: batchId, $now: now });
-        this.cancelBatchJobsStmt.run({ $batchId: batchId, $now: now });
+        this.stmts.cancelBatch.run({ $id: batchId, $now: now });
+        this.stmts.cancelBatchJobs.run({ $batchId: batchId, $now: now });
     }
     createWorker(options) {
         return new JobWorker(this, options);
@@ -562,7 +447,7 @@ export class JobQueue extends JobQueueEmitter {
             : null;
         // dedup='replace': update existing pending job's data + run_at
         if (options?.dedup === 'replace' && options.uniqueKey) {
-            const existing = this.selectDedupedJobStmt.get({
+            const existing = this.stmts.selectDedupedJob.get({
                 $type: type,
                 $uniqueKey: options.uniqueKey
             });
@@ -578,7 +463,7 @@ export class JobQueue extends JobQueueEmitter {
                 return existing.id;
             }
         }
-        const result = this.insertJobStmt.run({
+        const result = this.stmts.insertJob.run({
             $type: type,
             $data: JSON.stringify(data),
             $status: status,
@@ -594,7 +479,7 @@ export class JobQueue extends JobQueueEmitter {
         // INSERT OR IGNORE: if a pending/processing job with same (type, uniqueKey)
         // already exists, the insert is a no-op. Return the existing job id.
         if (result.changes === 0 && options?.uniqueKey) {
-            const existing = this.selectDedupedJobStmt.get({
+            const existing = this.stmts.selectDedupedJob.get({
                 $type: type,
                 $uniqueKey: options.uniqueKey
             });
@@ -603,14 +488,14 @@ export class JobQueue extends JobQueueEmitter {
             }
             return existing.id;
         }
-        const jobId = this.lastInsertRowIdStmt.get();
+        const jobId = this.stmts.lastInsertRowId.get();
         if (hasDeps) {
             for (const depId of options.dependsOn) {
-                const dep = this.selectJobStmt.get({ $id: depId });
+                const dep = this.stmts.selectJob.get({ $id: depId });
                 if (!dep) {
                     throw new Error(`Dependency job ${depId} does not exist`);
                 }
-                this.insertDepStmt.run({
+                this.stmts.insertDep.run({
                     $jobId: jobId.id,
                     $depsOnId: depId
                 });
@@ -629,7 +514,7 @@ export class JobQueue extends JobQueueEmitter {
         const result = this.db
             .query(`UPDATE jobs
          SET status = 'pending',
-             error = 'stale: worker crash or restart — reset for retry',
+             error = 'stale: worker crash or restart , reset for retry',
              updated_at = $now
          WHERE status = 'processing' AND updated_at < $cutoff`)
             .run({ $now: nowISO(), $cutoff: cutoff });
@@ -652,7 +537,7 @@ export class JobQueue extends JobQueueEmitter {
         return row ? toJob(row) : null;
     }
     getJobResult(id) {
-        const row = this.selectJobStmt.get({ $id: id });
+        const row = this.stmts.selectJob.get({ $id: id });
         if (!row?.result)
             return null;
         return JSON.parse(row.result);
@@ -672,7 +557,7 @@ export class JobQueue extends JobQueueEmitter {
         const now = nowISO();
         this.db.transaction(() => {
             for (const row of rows) {
-                this.insertJobStmt.run({
+                this.stmts.insertJob.run({
                     $type: row.type,
                     $data: row.data,
                     $status: 'pending',
@@ -742,71 +627,7 @@ export class JobQueue extends JobQueueEmitter {
         }));
     }
     mountAdminHandler(prefix = '') {
-        const base = prefix.replace(/\/$/, '');
-        return async (req) => {
-            const url = new URL(req.url);
-            const path = url.pathname.slice(base.length).replace(/^\//, '');
-            const parts = path.split('/').filter(Boolean);
-            const method = req.method.toUpperCase();
-            try {
-                if (method === 'GET' && parts[0] === 'stats' && parts.length === 1) {
-                    return Response.json(this.getStats());
-                }
-                if (method === 'GET' && parts[0] === 'jobs' && parts[1] === 'types') {
-                    return Response.json(this.getJobTypes());
-                }
-                if (method === 'GET' && parts[0] === 'jobs' && parts.length === 1) {
-                    const status = url.searchParams.get('status');
-                    const type = url.searchParams.get('type') ?? undefined;
-                    const limit = Number(url.searchParams.get('limit') ?? 50);
-                    const offset = Number(url.searchParams.get('offset') ?? 0);
-                    return Response.json(this.listJobs({ status: status ?? undefined, type, limit, offset }));
-                }
-                if (method === 'GET' && parts[0] === 'jobs' && parts.length === 2) {
-                    const id = Number(parts[1]);
-                    const job = this.getJob(id);
-                    if (!job)
-                        return Response.json({ error: 'Not found' }, { status: 404 });
-                    return Response.json(job);
-                }
-                if (method === 'GET' && parts[0] === 'jobs' && parts[2] === 'graph') {
-                    return Response.json(this.getJobGraph(Number(parts[1])));
-                }
-                if (method === 'POST' && parts[0] === 'jobs' && parts[2] === 'cancel') {
-                    return Response.json({ ok: this.cancelJob(Number(parts[1])) });
-                }
-                if (method === 'POST' &&
-                    parts[0] === 'jobs' &&
-                    parts[2] === 'force-retry') {
-                    return Response.json({ ok: this.forceRetryJob(Number(parts[1])) });
-                }
-                if (method === 'GET' && parts[0] === 'failed' && parts.length === 1) {
-                    const type = url.searchParams.get('type') ?? undefined;
-                    const limit = Number(url.searchParams.get('limit') ?? 50);
-                    const offset = Number(url.searchParams.get('offset') ?? 0);
-                    return Response.json(this.getFailedJobs({ type, limit, offset }));
-                }
-                if (method === 'POST' &&
-                    parts[0] === 'failed' &&
-                    parts[1] === 'retry-by-type') {
-                    const body = (await req.json());
-                    if (!body.type)
-                        return Response.json({ error: 'type required' }, { status: 400 });
-                    return Response.json({
-                        count: this.retryFailedJobsByType(body.type)
-                    });
-                }
-                if (method === 'POST' &&
-                    parts[0] === 'failed' &&
-                    parts[2] === 'retry') {
-                    return Response.json({ id: this.retryFailedJob(Number(parts[1])) });
-                }
-                return Response.json({ error: 'Not found' }, { status: 404 });
-            }
-            catch (err) {
-                return Response.json({ error: err instanceof Error ? err.message : 'Internal error' }, { status: 500 });
-            }
-        };
+        return createAdminHandler(this, prefix);
     }
     close() {
         try {
@@ -821,35 +642,35 @@ export class JobQueue extends JobQueueEmitter {
     }
     unblockDependents(completedJobId) {
         const now = nowISO();
-        const dependents = this.selectDependentsStmt.all({
+        const dependents = this.stmts.selectDependents.all({
             $depsOnId: completedJobId
         });
         for (const dep of dependents) {
-            const unmetCount = this.countUnmetDepsStmt.get({
+            const unmetCount = this.stmts.countUnmetDeps.get({
                 $jobId: dep.job_id
             });
             if (unmetCount.count === 0) {
-                this.unblockJobStmt.run({ $id: dep.job_id, $now: now });
+                this.stmts.unblockJob.run({ $id: dep.job_id, $now: now });
             }
         }
     }
     handleBatchJobComplete(batchId) {
-        this.decrementBatchPendingStmt.run({ $id: batchId });
-        const batch = this.selectBatchStmt.get({
+        this.stmts.decrementBatchPending.run({ $id: batchId });
+        const batch = this.stmts.selectBatch.get({
             $id: batchId
         });
         if (!batch || batch.pending_jobs > 0)
             return;
         // Batch is complete
         const now = nowISO();
-        this.finishBatchStmt.run({ $id: batchId, $now: now });
+        this.stmts.finishBatch.run({ $id: batchId, $now: now });
         const options = batch.options
             ? JSON.parse(batch.options)
             : null;
         if (options) {
             // Enqueue "then" callback job only if zero failures
             if (batch.failed_jobs === 0 && options.thenType) {
-                this.insertJobStmt.run({
+                this.stmts.insertJob.run({
                     $type: options.thenType,
                     $data: JSON.stringify(options.thenData ?? {}),
                     $status: 'pending',
@@ -865,7 +686,7 @@ export class JobQueue extends JobQueueEmitter {
             }
             // Enqueue "finally" callback job regardless of failures
             if (options.finallyType) {
-                this.insertJobStmt.run({
+                this.stmts.insertJob.run({
                     $type: options.finallyType,
                     $data: JSON.stringify(options.finallyData ?? {}),
                     $status: 'pending',
@@ -880,7 +701,7 @@ export class JobQueue extends JobQueueEmitter {
                 });
             }
         }
-        const finishedBatch = this.selectBatchStmt.get({
+        const finishedBatch = this.stmts.selectBatch.get({
             $id: batchId
         });
         if (finishedBatch) {

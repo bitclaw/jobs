@@ -1,7 +1,7 @@
 import type { MiddlewareFn } from './types';
 /**
  * Minimal interface matching @opentelemetry/api Tracer.
- * Typed structurally so @bitclaw/jobs stays dependency-free —
+ * Typed structurally so @bitclaw/jobs stays dependency-free ,
  * pass any OTel-compatible tracer without adding it as a peer dep.
  */
 export type OtelTracer = {
@@ -29,11 +29,11 @@ export type OtelSpan = {
  * ```
  *
  * Each span is named `job.<type>` and carries these attributes:
- * - `job.id`       — numeric job ID
- * - `job.type`     — job type string
- * - `job.priority` — job priority
- * - `job.retry`    — current retry count
- * - `job.error`    — error message (only on failure)
+ * - `job.id`       , numeric job ID
+ * - `job.type`     , job type string
+ * - `job.priority` , job priority
+ * - `job.retry`    , current retry count
+ * - `job.error`    , error message (only on failure)
  */
 export declare function createOtelMiddleware(tracer: OtelTracer): MiddlewareFn;
 //# sourceMappingURL=otel.d.ts.map

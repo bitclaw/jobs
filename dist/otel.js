@@ -14,11 +14,11 @@ const STATUS_ERROR = 2;
  * ```
  *
  * Each span is named `job.<type>` and carries these attributes:
- * - `job.id`       — numeric job ID
- * - `job.type`     — job type string
- * - `job.priority` — job priority
- * - `job.retry`    — current retry count
- * - `job.error`    — error message (only on failure)
+ * - `job.id`       , numeric job ID
+ * - `job.type`     , job type string
+ * - `job.priority` , job priority
+ * - `job.retry`    , current retry count
+ * - `job.error`    , error message (only on failure)
  */
 export function createOtelMiddleware(tracer) {
     return (job, next) => tracer.startActiveSpan(`job.${job.type}`, async (span) => {
