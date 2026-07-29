@@ -1,4 +1,4 @@
-import { setWalModeWithRetry } from './wal-mode';
+import { setWalModeWithRetry } from '@bitclaw/sqlite/wal-mode';
 const JOBS_TABLE = `
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
