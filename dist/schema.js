@@ -1,3 +1,4 @@
+import { setWalModeWithRetry } from './wal-mode';
 const JOBS_TABLE = `
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,8 +112,11 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
 )`;
 export function applyPragmas(db) {
     if (db.filename !== ':memory:' && db.filename !== '') {
-        db.run('PRAGMA journal_mode = WAL');
-        db.run('PRAGMA busy_timeout = 5000');
+        // busy_timeout first: correct for ordinary statement contention. The
+        // WAL-mode switch itself needs its own retry loop regardless - see
+        // wal-mode.ts for why busy_timeout alone doesn't cover it.
+        db.run('PRAGMA busy_timeout = 10000');
+        setWalModeWithRetry(db);
     }
     db.run('PRAGMA foreign_keys = ON');
     db.run('PRAGMA synchronous = NORMAL');
