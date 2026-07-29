@@ -48,6 +48,9 @@
       "default": "./dist/otel.js"
     }
   },
+  "dependencies": {
+    "@bitclaw/sqlite": "1.5.2"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "bun test",

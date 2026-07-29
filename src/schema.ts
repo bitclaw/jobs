@@ -1,7 +1,7 @@
 // packages/jobs/src/schema.ts
 // DDL constants, PRAGMA setup, and schema initialization for the jobs database
 import type { Database } from 'bun:sqlite';
-import { setWalModeWithRetry } from './wal-mode';
+import { setWalModeWithRetry } from '@bitclaw/sqlite/wal-mode';
 
 const JOBS_TABLE = `
 CREATE TABLE IF NOT EXISTS jobs (
