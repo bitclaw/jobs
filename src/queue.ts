@@ -240,7 +240,14 @@ export class JobQueue<
         "UPDATE jobs SET status = 'cancelled', updated_at = $now WHERE id = $id AND status IN ('pending', 'blocked')"
       )
       .run({ $id: id, $now: nowISO() });
-    return result.changes > 0;
+    const cancelled = result.changes > 0;
+    // A dependent blocked on this job must not stay blocked forever just
+    // because the dependency was cancelled instead of completing - same
+    // "wake on any terminal outcome" reasoning as markJobDone's own call.
+    // Row isn't deleted on cancel, so order relative to the status update
+    // above doesn't matter here (unlike markJobDead/markJobFailed).
+    if (cancelled) this.tryUnblockDependents(this.getDependents(id));
+    return cancelled;
   }
 
   forceRetryJob(id: number): boolean {
@@ -372,7 +379,7 @@ export class JobQueue<
         $now: now,
         $result: result !== undefined ? JSON.stringify(result) : null
       });
-      this.unblockDependents(id);
+      this.tryUnblockDependents(this.getDependents(id));
 
       if (row?.batch_id) {
         this.handleBatchJobComplete(row.batch_id);
@@ -413,7 +420,16 @@ export class JobQueue<
         $requestLog: row.request_log,
         $responseLog: row.response_log
       });
+      // Captured *before* deleteJob, not after - job_dependencies has
+      // ON DELETE CASCADE on depends_on_id (schema.ts), so deleting this
+      // row wipes the dependency edges as a side effect; capturing first is
+      // what lets a dependent still get found and unblocked below.
+      const dependents = this.getDependents(id);
       this.stmts.deleteJob.run({ $id: id });
+      // A dependent blocked on this job must not stay blocked forever just
+      // because the dependency died instead of completing - same "wake on
+      // any terminal outcome" reasoning as markJobDone's own call.
+      this.tryUnblockDependents(dependents);
 
       if (row.batch_id) {
         this.stmts.incrementBatchFailed.run({
@@ -446,7 +462,17 @@ export class JobQueue<
           $requestLog: row.request_log,
           $responseLog: row.response_log
         });
+        // Captured *before* deleteJob, not after - job_dependencies has
+        // ON DELETE CASCADE on depends_on_id (schema.ts), so deleting this
+        // row wipes the dependency edges as a side effect; capturing first
+        // is what lets a dependent still get found and unblocked below.
+        const dependents = this.getDependents(id);
         this.stmts.deleteJob.run({ $id: id });
+        // A dependent blocked on this job must not stay blocked forever
+        // just because the dependency dead-lettered instead of completing -
+        // same "wake on any terminal outcome" reasoning as markJobDone's
+        // own call.
+        this.tryUnblockDependents(dependents);
 
         // Job is permanently dead , decrement batch counter and track failure
         if (row.batch_id) {
@@ -587,7 +613,42 @@ export class JobQueue<
   ): number {
     const now = nowISO();
     const runAt = options?.runAt ? options.runAt.toISOString() : now;
-    const hasDeps = options?.dependsOn && options.dependsOn.length > 0;
+
+    // Resolved *before* deciding status/inserting the row, not after - a
+    // dependency that already reached a terminal state (done/cancelled/
+    // dead-lettered) by the time this runs must not block the new job at
+    // all, since unblockDependents only ever fires once, at the moment a
+    // dependency itself completes; inserting 'blocked' against an
+    // already-resolved dependency would never get unblocked. Also
+    // distinguishes "dependency id was legitimately dead-lettered" (not an
+    // error - already resolved) from "dependency id never existed" (a real
+    // caller bug, must still throw).
+    const liveDepIds: number[] = [];
+    if (options?.dependsOn) {
+      for (const depId of options.dependsOn) {
+        const dep = this.stmts.selectJob.get({ $id: depId }) as JobRow | null;
+        if (dep) {
+          if (
+            dep.status === 'pending' ||
+            dep.status === 'processing' ||
+            dep.status === 'blocked'
+          ) {
+            liveDepIds.push(depId);
+          }
+          // else: dep exists but already 'done'/'cancelled' - resolved,
+          // doesn't block, no edge needed.
+          continue;
+        }
+        const deadLettered = this.stmts.selectFailedJobByOriginalId.get({
+          $originalJobId: depId
+        });
+        if (!deadLettered) {
+          throw new Error(`Dependency job ${depId} does not exist`);
+        }
+        // else: dead-lettered - resolved, doesn't block, no edge needed.
+      }
+    }
+    const hasDeps = liveDepIds.length > 0;
     const status = hasDeps ? 'blocked' : 'pending';
     const expireAt = options?.expireAt ? options.expireAt.toISOString() : null;
     const webhookConfig = options?.onComplete
@@ -646,17 +707,11 @@ export class JobQueue<
 
     const jobId = this.stmts.lastInsertRowId.get() as { id: number };
 
-    if (hasDeps) {
-      for (const depId of options!.dependsOn!) {
-        const dep = this.stmts.selectJob.get({ $id: depId }) as JobRow | null;
-        if (!dep) {
-          throw new Error(`Dependency job ${depId} does not exist`);
-        }
-        this.stmts.insertDep.run({
-          $jobId: jobId.id,
-          $depsOnId: depId
-        });
-      }
+    for (const depId of liveDepIds) {
+      this.stmts.insertDep.run({
+        $jobId: jobId.id,
+        $depsOnId: depId
+      });
     }
 
     return jobId.id;
@@ -825,12 +880,22 @@ export class JobQueue<
     this.db.close();
   }
 
-  private unblockDependents(completedJobId: number): void {
-    const now = nowISO();
-    const dependents = this.stmts.selectDependents.all({
-      $depsOnId: completedJobId
+  // Split from tryUnblockDependents (below) because job_dependencies has
+  // ON DELETE CASCADE on depends_on_id (schema.ts) - deleteJob (used by
+  // markJobDead/markJobFailed's dead-letter branch) wipes the dependency
+  // edges as a side effect, before there'd be anything left to find. Callers
+  // that delete the job row must capture this list *before* deleting, then
+  // call tryUnblockDependents with it *after* - see markJobDead/markJobFailed
+  // for the shape. Callers that only update status (markJobDone, cancelJob)
+  // can call both back-to-back in either order, since the row survives.
+  private getDependents(jobId: number): Array<{ job_id: number }> {
+    return this.stmts.selectDependents.all({
+      $depsOnId: jobId
     }) as Array<{ job_id: number }>;
+  }
 
+  private tryUnblockDependents(dependents: Array<{ job_id: number }>): void {
+    const now = nowISO();
     for (const dep of dependents) {
       const unmetCount = this.stmts.countUnmetDeps.get({
         $jobId: dep.job_id

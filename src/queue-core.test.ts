@@ -86,6 +86,110 @@ describe('JobQueue', () => {
         )
       ).toThrow('Dependency job 9999 does not exist');
     });
+
+    test('dependsOn an already-done job inserts as pending, not blocked forever', () => {
+      const depId = queue.add('email:send', {
+        to: 'a@b.com',
+        subject: 'first'
+      });
+      queue.markJobDone(depId);
+
+      const id = queue.add(
+        'email:send',
+        { to: 'b@c.com', subject: 'second' },
+        { dependsOn: [depId] }
+      );
+
+      expect(queue.getJob(id)!.status).toBe('pending');
+    });
+
+    test('dependsOn an already-cancelled job inserts as pending, not blocked forever', () => {
+      const depId = queue.add('email:send', {
+        to: 'a@b.com',
+        subject: 'first'
+      });
+      queue.cancelJob(depId);
+
+      const id = queue.add(
+        'email:send',
+        { to: 'b@c.com', subject: 'second' },
+        { dependsOn: [depId] }
+      );
+
+      expect(queue.getJob(id)!.status).toBe('pending');
+    });
+
+    test('dependsOn an already-dead-lettered job inserts as pending, does not throw', () => {
+      const depId = queue.add(
+        'email:send',
+        { to: 'a@b.com', subject: 'first' },
+        { maxRetries: 1 }
+      );
+      queue.markJobFailed(depId, 'boom'); // exhausts the only retry, dead-letters
+      expect(queue.getJob(depId)).toBeNull(); // confirms it's actually gone
+
+      const id = queue.add(
+        'email:send',
+        { to: 'b@c.com', subject: 'second' },
+        { dependsOn: [depId] }
+      );
+
+      expect(queue.getJob(id)!.status).toBe('pending');
+    });
+  });
+
+  describe('unblockDependents on every terminal path, not just success', () => {
+    test('cancelling a job unblocks its dependent', () => {
+      const depId = queue.add('email:send', {
+        to: 'a@b.com',
+        subject: 'first'
+      });
+      const id = queue.add(
+        'email:send',
+        { to: 'b@c.com', subject: 'second' },
+        { dependsOn: [depId] }
+      );
+      expect(queue.getJob(id)!.status).toBe('blocked');
+
+      queue.cancelJob(depId);
+
+      expect(queue.getJob(id)!.status).toBe('pending');
+    });
+
+    test('dead-lettering a job unblocks its dependent', () => {
+      const depId = queue.add(
+        'email:send',
+        { to: 'a@b.com', subject: 'first' },
+        { maxRetries: 1 }
+      );
+      const id = queue.add(
+        'email:send',
+        { to: 'b@c.com', subject: 'second' },
+        { dependsOn: [depId] }
+      );
+      expect(queue.getJob(id)!.status).toBe('blocked');
+
+      queue.markJobFailed(depId, 'boom'); // exhausts the only retry, dead-letters
+
+      expect(queue.getJob(id)!.status).toBe('pending');
+    });
+
+    test('markJobDead unblocks its dependent', () => {
+      const depId = queue.add('email:send', {
+        to: 'a@b.com',
+        subject: 'first'
+      });
+      const id = queue.add(
+        'email:send',
+        { to: 'b@c.com', subject: 'second' },
+        { dependsOn: [depId] }
+      );
+      expect(queue.getJob(id)!.status).toBe('blocked');
+
+      queue.markJobDead(depId, 'unrecoverable');
+
+      expect(queue.getJob(id)!.status).toBe('pending');
+    });
   });
 
   describe('getJob', () => {
