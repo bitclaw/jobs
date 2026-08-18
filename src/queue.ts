@@ -94,6 +94,13 @@ export class JobQueue<
   readonly db: Database;
   readonly middlewares: MiddlewareFn[] = [];
   private readonly stmts: JobQueueStatements;
+  // Backstop for wal_autocheckpoint being left at SQLite's default rather
+  // than disabled - see schema.ts's applyPragmas. Bounds the WAL to
+  // roughly "writes accumulated per interval" under normal conditions;
+  // a PASSIVE checkpoint yields to any active reader/writer rather than
+  // blocking, so this isn't a hard guarantee under sustained contention,
+  // just a real backstop between SQLite's own auto-checkpoint triggers.
+  private readonly checkpointIntervalId: ReturnType<typeof setInterval> | null;
 
   constructor(dbPath: string) {
     super();
@@ -102,6 +109,20 @@ export class JobQueue<
     applyPragmas(this.db);
     initializeSchema(this.db);
     this.stmts = createStatements(this.db);
+
+    this.checkpointIntervalId =
+      this.db.filename !== ':memory:' && this.db.filename !== ''
+        ? setInterval(() => {
+            try {
+              this.db.run('PRAGMA wal_checkpoint(PASSIVE)');
+            } catch {
+              // Non-critical - next tick or close() will retry/finalize.
+            }
+          }, 60_000)
+        : null;
+    if (this.checkpointIntervalId?.unref) {
+      this.checkpointIntervalId.unref();
+    }
   }
 
   add<K extends string & keyof TMap>(
@@ -793,6 +814,7 @@ export class JobQueue<
   }
 
   close(): void {
+    if (this.checkpointIntervalId) clearInterval(this.checkpointIntervalId);
     try {
       if (this.db.filename !== ':memory:' && this.db.filename !== '') {
         this.db.run('PRAGMA wal_checkpoint(PASSIVE)');

@@ -140,7 +140,13 @@ export function applyPragmas(db: Database): void {
   db.run('PRAGMA cache_size = -4000');
   db.run('PRAGMA temp_store = MEMORY');
   db.run('PRAGMA mmap_size = 16777216'); // 16MB , jobs rows are small, no blobs
-  db.run('PRAGMA wal_autocheckpoint = 0'); // Litestream controls checkpointing
+  // wal_autocheckpoint is deliberately left at SQLite's own default (not
+  // disabled) - it used to be set to 0 here on the assumption an external
+  // Litestream process would checkpoint the WAL instead, but nothing ever
+  // configured Litestream to actually do that, so the WAL grew unchecked
+  // between clean process restarts. JobQueue's constructor now also runs
+  // its own periodic PRAGMA wal_checkpoint(PASSIVE) as a backstop, matching
+  // @bitclaw/sqlite's tenant-db.ts pattern - see queue.ts.
 }
 
 export function initializeSchema(db: Database): void {

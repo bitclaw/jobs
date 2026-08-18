@@ -1,5 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
+import { existsSync, statSync, unlinkSync } from 'node:fs';
+import { JobQueue } from './queue';
 import { applyPragmas } from './schema';
 
 describe('applyPragmas - concurrent open under lock contention', () => {
@@ -53,6 +55,81 @@ describe('applyPragmas - concurrent open under lock contention', () => {
       require('node:fs').unlinkSync(`${tmpPath}-shm`);
     } catch {
       // ignore
+    }
+  });
+});
+
+describe('applyPragmas - WAL checkpointing', () => {
+  // Regression test for the WAL file growing unbounded: wal_autocheckpoint
+  // used to be forced to 0 here on the assumption an external Litestream
+  // process would checkpoint the WAL instead - nothing ever configured
+  // Litestream to do that, so the WAL grew unchecked between clean process
+  // restarts. Fixed by leaving wal_autocheckpoint at SQLite's own default.
+  test('given a fresh db, when applyPragmas runs, then wal_autocheckpoint is left at a real (non-zero) value', () => {
+    const tmpPath = `/tmp/jobs-schema-autockpt-test-${Date.now()}.db`;
+    const db = new Database(tmpPath, { create: true });
+    applyPragmas(db);
+
+    const row = db.query('PRAGMA wal_autocheckpoint').get() as {
+      wal_autocheckpoint: number;
+    };
+    expect(row.wal_autocheckpoint).toBeGreaterThan(0);
+
+    db.close();
+    for (const suffix of ['', '-wal', '-shm']) {
+      try {
+        unlinkSync(`${tmpPath}${suffix}`);
+      } catch {
+        // ignore
+      }
+    }
+  });
+});
+
+describe('JobQueue - periodic WAL checkpoint backstop', () => {
+  // bun:test has no fake-timer mechanism that advances a real setInterval
+  // early (setSystemTime/useFakeTimers only mock Date, not scheduling), so
+  // this can't wait for the real 60s interval to fire without an actual
+  // 60s sleep. Instead, this proves the mechanism JobQueue's interval
+  // relies on - PRAGMA wal_checkpoint(PASSIVE) - actually works, by
+  // calling it directly the same way the interval callback does.
+  //
+  // Note: a PASSIVE checkpoint does NOT shrink the -wal file's size on
+  // disk (only a TRUNCATE checkpoint does, and TRUNCATE can block
+  // concurrent readers/writers, which is exactly why PASSIVE is the right
+  // choice for a background backstop). What PASSIVE actually does - and
+  // what bounds long-term growth - is flush all outstanding WAL frames
+  // back into the main db file so subsequent writes can reuse that space
+  // instead of the file growing further. wal_checkpoint's own return row
+  // reports (busy, log frames, checkpointed frames) - asserting
+  // log === checkpointed is the real proof the flush completed.
+  test('given a WAL grown by real writes, when PRAGMA wal_checkpoint(PASSIVE) runs, then all WAL frames get flushed back to the main db file', () => {
+    const tmpPath = `/tmp/jobs-queue-checkpoint-test-${Date.now()}.db`;
+    const queue = new JobQueue<{ noop: { n: number } }>(tmpPath);
+
+    for (let i = 0; i < 500; i++) {
+      queue.add('noop', { n: i });
+    }
+
+    const walPath = `${tmpPath}-wal`;
+    expect(existsSync(walPath)).toBe(true);
+    expect(statSync(walPath).size).toBeGreaterThan(0);
+
+    const result = queue.db.query('PRAGMA wal_checkpoint(PASSIVE)').get() as {
+      busy: number;
+      log: number;
+      checkpointed: number;
+    };
+    expect(result.log).toBeGreaterThan(0);
+    expect(result.checkpointed).toBe(result.log);
+
+    queue.close();
+    for (const suffix of ['', '-wal', '-shm']) {
+      try {
+        unlinkSync(`${tmpPath}${suffix}`);
+      } catch {
+        // ignore
+      }
     }
   });
 });
