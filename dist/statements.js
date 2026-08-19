@@ -55,10 +55,20 @@ export function createStatements(db) {
         selectDependents: db.query(`
       SELECT job_id FROM job_dependencies WHERE depends_on_id = $depsOnId
     `),
+        // Distinguishes "dependency id was dead-lettered (row moved here, then
+        // deleted from jobs)" from "dependency id never existed at all" - the
+        // former is a legitimate, already-resolved dependency and must not
+        // throw at insertJob's existence check; the latter is a genuine caller
+        // bug and must keep throwing.
+        selectFailedJobByOriginalId: db.query('SELECT original_job_id FROM failed_jobs WHERE original_job_id = $originalJobId LIMIT 1'),
+        // NOT IN ('done', 'cancelled'), not just != 'done' - a cancelled
+        // dependency's row persists (unlike a dead-lettered one, which is
+        // deleted) and must count as resolved too, or anything depending on it
+        // stays blocked forever, permanently, by construction.
         countUnmetDeps: db.query(`
       SELECT COUNT(*) as count FROM job_dependencies jd
       JOIN jobs j ON jd.depends_on_id = j.id
-      WHERE jd.job_id = $jobId AND j.status != 'done'
+      WHERE jd.job_id = $jobId AND j.status NOT IN ('done', 'cancelled')
     `),
         unblockJob: db.query(`
       UPDATE jobs SET status = 'pending', updated_at = $now

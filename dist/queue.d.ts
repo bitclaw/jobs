@@ -6,6 +6,7 @@ export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> ext
     readonly db: Database;
     readonly middlewares: MiddlewareFn[];
     private readonly stmts;
+    private readonly checkpointIntervalId;
     constructor(dbPath: string);
     add<K extends string & keyof TMap>(type: K, data: TMap[K], options?: AddJobOptions): number;
     getJob(id: number): Job | null;
@@ -58,7 +59,8 @@ export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> ext
     getJobGraph(rootId: number): JobGraphNode[];
     mountAdminHandler(prefix?: string): (req: Request) => Promise<Response>;
     close(): void;
-    private unblockDependents;
+    private getDependents;
+    private tryUnblockDependents;
     private handleBatchJobComplete;
 }
 //# sourceMappingURL=queue.d.ts.map

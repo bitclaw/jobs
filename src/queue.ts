@@ -364,29 +364,33 @@ export class JobQueue<
       } | null;
     } = { config: null };
 
-    this.db.transaction(() => {
-      const now = nowISO();
-      const row = this.stmts.selectJob.get({ $id: id }) as JobRow | null;
-      if (row?.webhook_config) {
-        try {
-          wh.config = JSON.parse(row.webhook_config) as typeof wh.config;
-        } catch {
-          // ignore malformed config
+    this.db
+      .transaction(() => {
+        const now = nowISO();
+        const row = this.stmts.selectJob.get({ $id: id }) as JobRow | null;
+        if (row?.webhook_config) {
+          try {
+            wh.config = JSON.parse(row.webhook_config) as typeof wh.config;
+          } catch {
+            // ignore malformed config
+          }
         }
-      }
-      this.stmts.markDone.run({
-        $id: id,
-        $now: now,
-        $result: result !== undefined ? JSON.stringify(result) : null
-      });
-      this.tryUnblockDependents(this.getDependents(id));
+        this.stmts.markDone.run({
+          $id: id,
+          $now: now,
+          $result: result !== undefined ? JSON.stringify(result) : null
+        });
+        this.tryUnblockDependents(this.getDependents(id));
 
-      if (row?.batch_id) {
-        this.handleBatchJobComplete(row.batch_id);
-      }
-      const updatedRow = this.stmts.selectJob.get({ $id: id }) as JobRow | null;
-      if (updatedRow) doneJob = toJob(updatedRow);
-    })();
+        if (row?.batch_id) {
+          this.handleBatchJobComplete(row.batch_id);
+        }
+        const updatedRow = this.stmts.selectJob.get({
+          $id: id
+        }) as JobRow | null;
+        if (updatedRow) doneJob = toJob(updatedRow);
+      })
+      .immediate();
 
     if (doneJob) this.emit('job:done', doneJob);
 
@@ -403,60 +407,19 @@ export class JobQueue<
 
   markJobDead(id: number, error: string): void {
     let deadJob: Job | null = null;
-    this.db.transaction(() => {
-      const row = this.stmts.selectJob.get({ $id: id }) as JobRow | null;
-      if (!row) return;
-      // capture before delete
-      deadJob = toJob(row);
+    this.db
+      .transaction(() => {
+        const row = this.stmts.selectJob.get({ $id: id }) as JobRow | null;
+        if (!row) return;
+        // capture before delete
+        deadJob = toJob(row);
 
-      this.stmts.insertFailedJob.run({
-        $originalJobId: row.id,
-        $type: row.type,
-        $data: row.data,
-        $error: error,
-        $retryCount: row.retry_count,
-        $maxRetries: row.max_retries,
-        $createdAt: row.created_at,
-        $requestLog: row.request_log,
-        $responseLog: row.response_log
-      });
-      // Captured *before* deleteJob, not after - job_dependencies has
-      // ON DELETE CASCADE on depends_on_id (schema.ts), so deleting this
-      // row wipes the dependency edges as a side effect; capturing first is
-      // what lets a dependent still get found and unblocked below.
-      const dependents = this.getDependents(id);
-      this.stmts.deleteJob.run({ $id: id });
-      // A dependent blocked on this job must not stay blocked forever just
-      // because the dependency died instead of completing - same "wake on
-      // any terminal outcome" reasoning as markJobDone's own call.
-      this.tryUnblockDependents(dependents);
-
-      if (row.batch_id) {
-        this.stmts.incrementBatchFailed.run({
-          $id: row.batch_id,
-          $jobId: row.id
-        });
-        this.handleBatchJobComplete(row.batch_id);
-      }
-    })();
-
-    if (deadJob) this.emit('job:dead', deadJob, error);
-  }
-
-  markJobFailed(id: number, error: string): void {
-    let failedJob: Job | null = null;
-    this.db.transaction(() => {
-      const now = nowISO();
-      const row = this.stmts.selectJob.get({ $id: id }) as JobRow | null;
-      if (!row) return;
-
-      if (row.retry_count + 1 >= row.max_retries) {
         this.stmts.insertFailedJob.run({
           $originalJobId: row.id,
           $type: row.type,
           $data: row.data,
           $error: error,
-          $retryCount: row.retry_count + 1,
+          $retryCount: row.retry_count,
           $maxRetries: row.max_retries,
           $createdAt: row.created_at,
           $requestLog: row.request_log,
@@ -464,17 +427,15 @@ export class JobQueue<
         });
         // Captured *before* deleteJob, not after - job_dependencies has
         // ON DELETE CASCADE on depends_on_id (schema.ts), so deleting this
-        // row wipes the dependency edges as a side effect; capturing first
-        // is what lets a dependent still get found and unblocked below.
+        // row wipes the dependency edges as a side effect; capturing first is
+        // what lets a dependent still get found and unblocked below.
         const dependents = this.getDependents(id);
         this.stmts.deleteJob.run({ $id: id });
-        // A dependent blocked on this job must not stay blocked forever
-        // just because the dependency dead-lettered instead of completing -
-        // same "wake on any terminal outcome" reasoning as markJobDone's
-        // own call.
+        // A dependent blocked on this job must not stay blocked forever just
+        // because the dependency died instead of completing - same "wake on
+        // any terminal outcome" reasoning as markJobDone's own call.
         this.tryUnblockDependents(dependents);
 
-        // Job is permanently dead , decrement batch counter and track failure
         if (row.batch_id) {
           this.stmts.incrementBatchFailed.run({
             $id: row.batch_id,
@@ -482,50 +443,99 @@ export class JobQueue<
           });
           this.handleBatchJobComplete(row.batch_id);
         }
-      } else {
-        const backoff = row.backoff_config
-          ? (JSON.parse(row.backoff_config) as BackoffConfig)
-          : null;
-        let retryRunAt = now;
-        if (backoff) {
-          let delayMs: number;
-          switch (backoff.type) {
-            case 'exponential':
-              delayMs = Math.min(
-                backoff.delayMs * 2 ** row.retry_count,
-                3_600_000
-              );
-              break;
-            case 'jitter':
-              delayMs = Math.min(
-                backoff.delayMs * 2 ** row.retry_count * (0.5 + Math.random()),
-                3_600_000
-              );
-              break;
-            case 'fibonacci':
-              delayMs = Math.min(
-                backoff.delayMs * this.fib(row.retry_count),
-                3_600_000
-              );
-              break;
-            default: // 'fixed'
-              delayMs = backoff.delayMs;
+      })
+      .immediate();
+
+    if (deadJob) this.emit('job:dead', deadJob, error);
+  }
+
+  markJobFailed(id: number, error: string): void {
+    let failedJob: Job | null = null;
+    this.db
+      .transaction(() => {
+        const now = nowISO();
+        const row = this.stmts.selectJob.get({ $id: id }) as JobRow | null;
+        if (!row) return;
+
+        if (row.retry_count + 1 >= row.max_retries) {
+          this.stmts.insertFailedJob.run({
+            $originalJobId: row.id,
+            $type: row.type,
+            $data: row.data,
+            $error: error,
+            $retryCount: row.retry_count + 1,
+            $maxRetries: row.max_retries,
+            $createdAt: row.created_at,
+            $requestLog: row.request_log,
+            $responseLog: row.response_log
+          });
+          // Captured *before* deleteJob, not after - job_dependencies has
+          // ON DELETE CASCADE on depends_on_id (schema.ts), so deleting this
+          // row wipes the dependency edges as a side effect; capturing first
+          // is what lets a dependent still get found and unblocked below.
+          const dependents = this.getDependents(id);
+          this.stmts.deleteJob.run({ $id: id });
+          // A dependent blocked on this job must not stay blocked forever
+          // just because the dependency dead-lettered instead of completing -
+          // same "wake on any terminal outcome" reasoning as markJobDone's
+          // own call.
+          this.tryUnblockDependents(dependents);
+
+          // Job is permanently dead , decrement batch counter and track failure
+          if (row.batch_id) {
+            this.stmts.incrementBatchFailed.run({
+              $id: row.batch_id,
+              $jobId: row.id
+            });
+            this.handleBatchJobComplete(row.batch_id);
           }
-          retryRunAt = new Date(Date.now() + delayMs).toISOString();
+        } else {
+          const backoff = row.backoff_config
+            ? (JSON.parse(row.backoff_config) as BackoffConfig)
+            : null;
+          let retryRunAt = now;
+          if (backoff) {
+            let delayMs: number;
+            switch (backoff.type) {
+              case 'exponential':
+                delayMs = Math.min(
+                  backoff.delayMs * 2 ** row.retry_count,
+                  3_600_000
+                );
+                break;
+              case 'jitter':
+                delayMs = Math.min(
+                  backoff.delayMs *
+                    2 ** row.retry_count *
+                    (0.5 + Math.random()),
+                  3_600_000
+                );
+                break;
+              case 'fibonacci':
+                delayMs = Math.min(
+                  backoff.delayMs * this.fib(row.retry_count),
+                  3_600_000
+                );
+                break;
+              default: // 'fixed'
+                delayMs = backoff.delayMs;
+            }
+            retryRunAt = new Date(Date.now() + delayMs).toISOString();
+          }
+          this.stmts.markFailed.run({
+            $id: id,
+            $error: error,
+            $runAt: retryRunAt,
+            $now: now
+          });
+          // capture updated job for post-tx emit
+          const updatedRow = this.stmts.selectJob.get({
+            $id: id
+          }) as JobRow | null;
+          if (updatedRow) failedJob = toJob(updatedRow);
         }
-        this.stmts.markFailed.run({
-          $id: id,
-          $error: error,
-          $runAt: retryRunAt,
-          $now: now
-        });
-        // capture updated job for post-tx emit
-        const updatedRow = this.stmts.selectJob.get({
-          $id: id
-        }) as JobRow | null;
-        if (updatedRow) failedJob = toJob(updatedRow);
-      }
-    })();
+      })
+      .immediate();
 
     if (failedJob) this.emit('job:failed', failedJob, error);
   }
