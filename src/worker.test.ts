@@ -520,4 +520,72 @@ describe('JobWorker', () => {
       expect(after).toBeGreaterThan(before);
     });
   });
+
+  describe('mark-status write failure isolation', () => {
+    // Regression: markJobDone/markJobFailed/markJobDead used to be called
+    // with no guard around them in runJob. A throw there (e.g. SQLITE_BUSY
+    // under contention) either fell through to the catch block and wrongly
+    // reclassified a successfully-handled job as failed/dead, or - for the
+    // failed/dead calls themselves - escaped as an unhandled promise
+    // rejection, since poll() invokes runJob via `void this.runJob(job)`.
+    // Both are now caught locally and emitted as events instead. Uses a spy
+    // on the real queue methods (not a real lock hold) to keep this fast.
+
+    test('markJobDone throwing does not reclassify the job as failed/dead', async () => {
+      const id = queue.add('test:work', { value: 'x' });
+      const markDoneSpy = vi
+        .spyOn(queue, 'markJobDone')
+        .mockImplementation(() => {
+          throw new Error('SQLITE_BUSY: database is locked');
+        });
+      const events: unknown[] = [];
+      queue.on('job:markDoneFailed', (job, err) => events.push([job, err]));
+
+      const worker = queue.createWorker({
+        type: 'test:work',
+        handler: async () => {},
+        pollIntervalMs: 10
+      });
+
+      worker.start();
+      await sleep(50);
+      await worker.stop();
+
+      expect(markDoneSpy).toHaveBeenCalledTimes(1);
+      expect(events).toHaveLength(1);
+      const job = queue.getJob(id)!;
+      // Not flipped to failed/dead by the catch block - markJobFailed/Dead
+      // were never called, so the job stays exactly where markJobDone left it.
+      expect(job.status).toBe('processing');
+    });
+
+    test('markJobFailed throwing does not crash the worker or skip onError', async () => {
+      queue.add('test:work', { value: 'x' });
+      vi.spyOn(queue, 'markJobFailed').mockImplementation(() => {
+        throw new Error('SQLITE_BUSY: database is locked');
+      });
+      const markFailedErrorEvents: unknown[] = [];
+      queue.on('job:markFailedError', (job, err) =>
+        markFailedErrorEvents.push([job, err])
+      );
+      const onError = vi.fn();
+
+      const worker = queue.createWorker({
+        type: 'test:work',
+        handler: async () => {
+          throw new Error('handler boom');
+        },
+        pollIntervalMs: 10,
+        onError
+      });
+
+      worker.start();
+      await sleep(50);
+      await worker.stop();
+
+      expect(markFailedErrorEvents).toHaveLength(1);
+      // onError still runs even though markJobFailed threw.
+      expect(onError).toHaveBeenCalledTimes(1);
+    });
+  });
 });

@@ -92,3 +92,83 @@ describe('markJobFailed/markJobDone/markJobDead - lock contention', () => {
     }
   });
 });
+
+// Regression tests for the same class of bug in retryFailedJob,
+// retryFailedJobsByType, addToBatch, and cancelBatch: each used to run its
+// SELECT (or existence check) outside any transaction, then write separately -
+// letting two concurrent callers read the same stale state and double-write
+// (double-enqueue on retry, desynced counters on batch ops). Each is now a
+// single .immediate() transaction, so a competing writer is waited out via
+// busy_timeout instead of racing a stale read.
+describe('retry/batch write paths - lock contention', () => {
+  async function withHolder(tmpPath: string, fn: () => void): Promise<void> {
+    const holderScript = `
+      import { Database } from 'bun:sqlite';
+      const db = new Database(${JSON.stringify(tmpPath)}, { create: true });
+      db.run('PRAGMA busy_timeout = 10000');
+      db.run('BEGIN IMMEDIATE');
+      await Bun.sleep(300);
+      db.run('COMMIT');
+    `;
+    const holder = Bun.spawn(['bun', '-e', holderScript], {
+      stdout: 'inherit',
+      stderr: 'inherit'
+    });
+    await Bun.sleep(80);
+
+    const t0 = Date.now();
+    expect(fn).not.toThrow();
+    expect(Date.now() - t0).toBeGreaterThan(100);
+
+    await holder.exited;
+    try {
+      unlinkSync(tmpPath);
+      unlinkSync(`${tmpPath}-wal`);
+      unlinkSync(`${tmpPath}-shm`);
+    } catch {
+      // ignore
+    }
+  }
+
+  test('retryFailedJob waits for the write lock instead of throwing', async () => {
+    const tmpPath = `/tmp/jobs-lock-contention-test-${Date.now()}-c.db`;
+    const queue = new JobQueue(tmpPath);
+    const jobId = queue.add('test:job', { foo: 'bar' });
+    queue.markJobDead(jobId, 'boom');
+    const [failed] = queue.getFailedJobs().items;
+
+    await withHolder(tmpPath, () => queue.retryFailedJob(failed!.id));
+    queue.close();
+  });
+
+  test('retryFailedJobsByType waits for the write lock instead of throwing', async () => {
+    const tmpPath = `/tmp/jobs-lock-contention-test-${Date.now()}-d.db`;
+    const queue = new JobQueue(tmpPath);
+    const jobId = queue.add('test:job', { foo: 'bar' });
+    queue.markJobDead(jobId, 'boom');
+
+    await withHolder(tmpPath, () => queue.retryFailedJobsByType('test:job'));
+    queue.close();
+  });
+
+  test('addToBatch waits for the write lock instead of throwing', async () => {
+    const tmpPath = `/tmp/jobs-lock-contention-test-${Date.now()}-e.db`;
+    const queue = new JobQueue(tmpPath);
+    const batchId = queue.createBatch('test-batch');
+
+    await withHolder(tmpPath, () =>
+      queue.addToBatch(batchId, 'test:job', { foo: 'bar' })
+    );
+    queue.close();
+  });
+
+  test('cancelBatch waits for the write lock instead of throwing', async () => {
+    const tmpPath = `/tmp/jobs-lock-contention-test-${Date.now()}-f.db`;
+    const queue = new JobQueue(tmpPath);
+    const batchId = queue.createBatch('test-batch');
+    queue.addToBatch(batchId, 'test:job', { foo: 'bar' });
+
+    await withHolder(tmpPath, () => queue.cancelBatch(batchId));
+    queue.close();
+  });
+});

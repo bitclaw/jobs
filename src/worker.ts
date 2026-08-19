@@ -92,7 +92,10 @@ export class JobWorker<
   private scheduleNext(): void {
     if (!this.running) return;
     const interval = this.options.pollIntervalMs ?? 1000;
-    this.timer = setTimeout(() => this.poll(), interval);
+    // Jitter desynchronizes concurrent worker processes so their poll ticks
+    // don't bunch up and contend for the write lock in lockstep.
+    const jitter = interval * 0.1 * Math.random();
+    this.timer = setTimeout(() => this.poll(), interval + jitter);
   }
 
   private async poll(): Promise<void> {
@@ -190,7 +193,14 @@ export class JobWorker<
         handlerResult = await execute();
       }
 
-      this.queue.markJobDone(job.id, handlerResult);
+      try {
+        this.queue.markJobDone(job.id, handlerResult);
+      } catch (markError: unknown) {
+        // Handler already succeeded - don't let a write failure here (e.g.
+        // SQLITE_BUSY under contention) fall through to the catch block below
+        // and get this job wrongly reclassified as failed/dead.
+        this.queue.emit('job:markDoneFailed', job, markError);
+      }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       // Check both instanceof (same bundle) and the isNonRetryable property
@@ -205,10 +215,14 @@ export class JobWorker<
         ? this.options.retryIf(error, job as Job<TMap[K]>)
         : true;
 
-      if (isNonRetryable || !shouldRetry) {
-        this.queue.markJobDead(job.id, message);
-      } else {
-        this.queue.markJobFailed(job.id, message);
+      try {
+        if (isNonRetryable || !shouldRetry) {
+          this.queue.markJobDead(job.id, message);
+        } else {
+          this.queue.markJobFailed(job.id, message);
+        }
+      } catch (markError: unknown) {
+        this.queue.emit('job:markFailedError', job, markError);
       }
       this.options.onError?.(job as Job<TMap[K]>, error);
     } finally {

@@ -130,7 +130,9 @@ export class JobQueue<
     data: TMap[K],
     options?: AddJobOptions
   ): number {
-    return this.insertJob(type, data, null, options);
+    return this.db
+      .transaction(() => this.insertJob(type, data, null, options))
+      .immediate();
   }
 
   getJob(id: number): Job | null {
@@ -275,36 +277,40 @@ export class JobQueue<
   }
 
   retryFailedJob(failedJobId: number): number {
-    const row = this.db
-      .query('SELECT * FROM failed_jobs WHERE id = $id')
-      .get({ $id: failedJobId }) as FailedJobRow | null;
+    return this.db
+      .transaction(() => {
+        const row = this.db
+          .query('SELECT * FROM failed_jobs WHERE id = $id')
+          .get({ $id: failedJobId }) as FailedJobRow | null;
 
-    if (!row) {
-      throw new Error(`Failed job ${failedJobId} not found`);
-    }
+        if (!row) {
+          throw new Error(`Failed job ${failedJobId} not found`);
+        }
 
-    const now = nowISO();
-    this.stmts.insertJob.run({
-      $type: row.type,
-      $data: row.data,
-      $status: 'pending',
-      $priority: 0,
-      $maxRetries: row.max_retries,
-      $runAt: now,
-      $batchId: null,
-      $uniqueKey: null,
-      $backoffConfig: null,
-      $expireAt: null,
-      $webhookConfig: null
-    });
+        const now = nowISO();
+        this.stmts.insertJob.run({
+          $type: row.type,
+          $data: row.data,
+          $status: 'pending',
+          $priority: 0,
+          $maxRetries: row.max_retries,
+          $runAt: now,
+          $batchId: null,
+          $uniqueKey: null,
+          $backoffConfig: null,
+          $expireAt: null,
+          $webhookConfig: null
+        });
 
-    const newJobId = this.stmts.lastInsertRowId.get() as { id: number };
+        const newJobId = this.stmts.lastInsertRowId.get() as { id: number };
 
-    this.db
-      .query('DELETE FROM failed_jobs WHERE id = $id')
-      .run({ $id: failedJobId });
+        this.db
+          .query('DELETE FROM failed_jobs WHERE id = $id')
+          .run({ $id: failedJobId });
 
-    return newJobId.id;
+        return newJobId.id;
+      })
+      .immediate();
   }
 
   purgeFailedJobs(olderThanMs: number): number {
@@ -579,21 +585,25 @@ export class JobQueue<
     data: TMap[K],
     options?: AddJobOptions
   ): number {
-    const batchExists = this.db
-      .query('SELECT id FROM job_batches WHERE id = ? LIMIT 1')
-      .get(batchId);
-    if (!batchExists)
-      throw new Error(`addToBatch: batch "${batchId}" does not exist`);
+    return this.db
+      .transaction(() => {
+        const batchExists = this.db
+          .query('SELECT id FROM job_batches WHERE id = ? LIMIT 1')
+          .get(batchId);
+        if (!batchExists)
+          throw new Error(`addToBatch: batch "${batchId}" does not exist`);
 
-    const jobId = this.insertJob(type, data, batchId, options);
+        const jobId = this.insertJob(type, data, batchId, options);
 
-    this.db
-      .query(
-        'UPDATE job_batches SET total_jobs = total_jobs + 1, pending_jobs = pending_jobs + 1 WHERE id = $id'
-      )
-      .run({ $id: batchId });
+        this.db
+          .query(
+            'UPDATE job_batches SET total_jobs = total_jobs + 1, pending_jobs = pending_jobs + 1 WHERE id = $id'
+          )
+          .run({ $id: batchId });
 
-    return jobId;
+        return jobId;
+      })
+      .immediate();
   }
 
   getBatch(batchId: string): JobBatch | null {
@@ -605,8 +615,12 @@ export class JobQueue<
 
   cancelBatch(batchId: string): void {
     const now = nowISO();
-    this.stmts.cancelBatch.run({ $id: batchId, $now: now });
-    this.stmts.cancelBatchJobs.run({ $batchId: batchId, $now: now });
+    this.db
+      .transaction(() => {
+        this.stmts.cancelBatch.run({ $id: batchId, $now: now });
+        this.stmts.cancelBatchJobs.run({ $batchId: batchId, $now: now });
+      })
+      .immediate();
   }
 
   createWorker<K extends string & keyof TMap>(
@@ -781,35 +795,37 @@ export class JobQueue<
   }
 
   retryFailedJobsByType(type: string): number {
-    const rows = this.db
-      .query('SELECT * FROM failed_jobs WHERE type = $type')
-      .all({ $type: type }) as FailedJobRow[];
+    return this.db
+      .transaction(() => {
+        const rows = this.db
+          .query('SELECT * FROM failed_jobs WHERE type = $type')
+          .all({ $type: type }) as FailedJobRow[];
 
-    if (rows.length === 0) return 0;
+        if (rows.length === 0) return 0;
 
-    const now = nowISO();
-    this.db.transaction(() => {
-      for (const row of rows) {
-        this.stmts.insertJob.run({
-          $type: row.type,
-          $data: row.data,
-          $status: 'pending',
-          $priority: 0,
-          $maxRetries: row.max_retries,
-          $runAt: now,
-          $batchId: null,
-          $uniqueKey: null,
-          $backoffConfig: null,
-          $expireAt: null,
-          $webhookConfig: null
-        });
-        this.db
-          .query('DELETE FROM failed_jobs WHERE id = $id')
-          .run({ $id: row.id });
-      }
-    })();
+        const now = nowISO();
+        for (const row of rows) {
+          this.stmts.insertJob.run({
+            $type: row.type,
+            $data: row.data,
+            $status: 'pending',
+            $priority: 0,
+            $maxRetries: row.max_retries,
+            $runAt: now,
+            $batchId: null,
+            $uniqueKey: null,
+            $backoffConfig: null,
+            $expireAt: null,
+            $webhookConfig: null
+          });
+          this.db
+            .query('DELETE FROM failed_jobs WHERE id = $id')
+            .run({ $id: row.id });
+        }
 
-    return rows.length;
+        return rows.length;
+      })
+      .immediate();
   }
 
   purgeExpiredJobs(): number {

@@ -151,6 +151,10 @@ queue.createWorker({
 })
 ```
 
+Write APIs (`add`, `addToBatch`, `cancelBatch`, `retryFailedJob`, `retryFailedJobsByType`, and the internal `markJobDone`/`markJobFailed`/`markJobDead`) are each wrapped in a single immediate (`BEGIN IMMEDIATE`) transaction, so concurrent processes writing to the same DB file don't race on read-then-write. Cross-process write contention still serializes on SQLite's single writer; `busy_timeout` (10s, `schema.ts`) is the ceiling on how long a write waits before failing. At very high write concurrency across many processes, that ceiling is the next thing to watch - sharding into multiple DB files (e.g. per tenant) is the escape hatch if 10s waits start queuing visibly.
+
+`queue.db` is exposed for advanced use, but don't wrap `queue.add()` / `addToBatch()` / etc. inside your own `db.transaction()` - `bun:sqlite` has no savepoint nesting, and a nested `BEGIN` will throw.
+
 ---
 
 ## Startup Recovery

@@ -5,6 +5,8 @@ export type JobQueueEventMap = {
     'job:dead': (job: Job, error: string) => void;
     'job:progress': (job: Job, progress: number) => void;
     'job:stale': (count: number) => void;
+    'job:markDoneFailed': (job: Job, error: unknown) => void;
+    'job:markFailedError': (job: Job, error: unknown) => void;
     'batch:complete': (batch: JobBatch) => void;
     'batch:failed': (batch: JobBatch) => void;
 };
