@@ -52,6 +52,7 @@ function toJob<T = unknown>(row: JobRow): Job<T> {
     responseLog: row.response_log,
     uniqueKey: row.unique_key,
     claimedUntil: row.claimed_until,
+    claimId: row.claim_id ?? null,
     result: row.result ? JSON.parse(row.result) : null,
     expireAt: row.expire_at
   };
@@ -332,6 +333,7 @@ export class JobQueue<
   pollAndClaim(type: string, leaseMs = 300_000): Job | null {
     const now = nowISO();
     const claimedUntil = new Date(Date.now() + leaseMs).toISOString();
+    const claimId = crypto.randomUUID();
     const claimTx = this.db.transaction(() => {
       const row = this.stmts.selectPending.get({
         $type: type,
@@ -341,26 +343,50 @@ export class JobQueue<
       this.stmts.markProcessing.run({
         $id: row.id,
         $now: now,
-        $claimedUntil: claimedUntil
+        $claimedUntil: claimedUntil,
+        $claimId: claimId
       });
-      return row;
+      return {
+        ...row,
+        status: 'processing',
+        started_at: now,
+        updated_at: now,
+        claimed_until: claimedUntil,
+        claim_id: claimId
+      } as JobRow;
     });
 
     const row = claimTx.immediate();
     return row ? toJob(row) : null;
   }
 
-  renewLease(id: number, leaseMs: number): void {
+  /**
+   * Extends a processing job's lease. With `claimId`, only the current
+   * claim holder can renew; returns false when the lease was lost.
+   */
+  renewLease(id: number, leaseMs: number, claimId?: string): boolean {
     const claimedUntil = new Date(Date.now() + leaseMs).toISOString();
-    this.stmts.renewLease.run({
+    const result = this.stmts.renewLease.run({
       $id: id,
       $claimedUntil: claimedUntil,
-      $now: nowISO()
+      $now: nowISO(),
+      $claimId: claimId ?? null
     });
+    return result.changes > 0;
   }
 
-  markJobDone(id: number, result?: unknown): void {
+  // Fencing check for the mark* methods: with a claimId, only the worker
+  // holding the current claim may finish the job. Without one (admin/manual
+  // callers), behavior is unchanged.
+  private holdsClaim(row: JobRow | null, claimId?: string): boolean {
+    if (claimId === undefined) return true;
+    return row?.status === 'processing' && row.claim_id === claimId;
+  }
+
+  /** Returns false (and changes nothing) if `claimId` no longer holds the job. */
+  markJobDone(id: number, result?: unknown, claimId?: string): boolean {
     let doneJob: Job | null = null;
+    let fenced = false;
     // Use container object so TypeScript tracks mutation across the closure
     const wh: {
       config: {
@@ -374,6 +400,10 @@ export class JobQueue<
       .transaction(() => {
         const now = nowISO();
         const row = this.stmts.selectJob.get({ $id: id }) as JobRow | null;
+        if (!this.holdsClaim(row, claimId)) {
+          fenced = true;
+          return;
+        }
         if (row?.webhook_config) {
           try {
             wh.config = JSON.parse(row.webhook_config) as typeof wh.config;
@@ -398,6 +428,7 @@ export class JobQueue<
       })
       .immediate();
 
+    if (fenced) return false;
     if (doneJob) this.emit('job:done', doneJob);
 
     if (wh.config && doneJob) {
@@ -409,13 +440,20 @@ export class JobQueue<
         body: JSON.stringify({ job: payload, result })
       }).catch(() => {});
     }
+    return true;
   }
 
-  markJobDead(id: number, error: string): void {
+  /** Returns false (and changes nothing) if `claimId` no longer holds the job. */
+  markJobDead(id: number, error: string, claimId?: string): boolean {
     let deadJob: Job | null = null;
+    let fenced = false;
     this.db
       .transaction(() => {
         const row = this.stmts.selectJob.get({ $id: id }) as JobRow | null;
+        if (!this.holdsClaim(row, claimId)) {
+          fenced = true;
+          return;
+        }
         if (!row) return;
         // capture before delete
         deadJob = toJob(row);
@@ -452,15 +490,23 @@ export class JobQueue<
       })
       .immediate();
 
+    if (fenced) return false;
     if (deadJob) this.emit('job:dead', deadJob, error);
+    return true;
   }
 
-  markJobFailed(id: number, error: string): void {
+  /** Returns false (and changes nothing) if `claimId` no longer holds the job. */
+  markJobFailed(id: number, error: string, claimId?: string): boolean {
     let failedJob: Job | null = null;
+    let fenced = false;
     this.db
       .transaction(() => {
         const now = nowISO();
         const row = this.stmts.selectJob.get({ $id: id }) as JobRow | null;
+        if (!this.holdsClaim(row, claimId)) {
+          fenced = true;
+          return;
+        }
         if (!row) return;
 
         if (row.retry_count + 1 >= row.max_retries) {
@@ -543,7 +589,9 @@ export class JobQueue<
       })
       .immediate();
 
+    if (fenced) return false;
     if (failedJob) this.emit('job:failed', failedJob, error);
+    return true;
   }
 
   private fib(n: number): number {

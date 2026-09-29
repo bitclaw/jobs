@@ -28,7 +28,7 @@ export function createStatements(db: Database) {
       LIMIT 1
     `),
     markProcessing: db.query(`
-      UPDATE jobs SET status = 'processing', started_at = $now, updated_at = $now, claimed_until = $claimedUntil
+      UPDATE jobs SET status = 'processing', started_at = $now, updated_at = $now, claimed_until = $claimedUntil, claim_id = $claimId
       WHERE id = $id
     `),
     markDone: db.query(`
@@ -41,7 +41,8 @@ export function createStatements(db: Database) {
           retry_count = retry_count + 1,
           error = $error,
           run_at = $runAt,
-          updated_at = $now
+          updated_at = $now,
+          claim_id = NULL
       WHERE id = $id
     `),
     updateProgress: db.query(`
@@ -84,6 +85,7 @@ export function createStatements(db: Database) {
     renewLease: db.query(`
       UPDATE jobs SET claimed_until = $claimedUntil, updated_at = $now
       WHERE id = $id AND status = 'processing'
+        AND ($claimId IS NULL OR claim_id = $claimId)
     `),
     // Batch
     insertBatch: db.query(`

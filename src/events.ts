@@ -8,6 +8,8 @@ export type JobQueueEventMap = {
   'job:stale': (count: number) => void;
   'job:markDoneFailed': (job: Job, error: unknown) => void;
   'job:markFailedError': (job: Job, error: unknown) => void;
+  /** A worker's claim was superseded (lease expired and the job was reclaimed); its result/failure was discarded. */
+  'job:leaseLost': (job: Job) => void;
   'batch:complete': (batch: JobBatch) => void;
   'batch:failed': (batch: JobBatch) => void;
 };

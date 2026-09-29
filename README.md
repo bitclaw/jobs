@@ -20,7 +20,8 @@ Requires Bun ≥ 1.3.0. Uses `bun:sqlite` , no native build step, no extra packa
 | **Dead-letter** | Exhausted jobs moved to `failed_jobs`, retryable via `retryFailedJob` |
 | **Dependencies** | Blocked jobs auto-unblock when all deps complete |
 | **Multi-process safety** | Lease column (`claimed_until`) prevents double-claim across processes |
-| **Lease renewal** | Long-running handlers call `ctx.renewLease()` to extend their claim |
+| **Lease heartbeat** | Workers renew a running job's lease automatically (`heartbeatMs`), so a live job is never reclaimed |
+| **Claim fencing** | Each claim gets a `claimId`; a worker that lost its lease can't finish, fail, or renew the job (`job:leaseLost`) |
 | **Batches** | Group jobs, track progress, fire `then`/`finally` callbacks on completion |
 | **Cron scheduler** | 5-field cron parser, persistent `schedules` table, overlap control |
 | **Rate limiter** | Per-worker sliding-window throttle (`maxRate`) |
@@ -81,7 +82,8 @@ All options for `queue.createWorker(options)`:
 | `concurrency` | `number` | `1` | Max parallel jobs per poll tick |
 | `pollIntervalMs` | `number` | `1000` | Poll interval in ms |
 | `leaseMs` | `number` | `300000` | Job lease duration in ms |
-| `timeoutMs` | `number` | , | Per-job timeout; throws if exceeded |
+| `heartbeatMs` | `number` | `leaseMs / 4` | Lease auto-renew interval; `0` disables |
+| `timeoutMs` | `number` | , | Per-job timeout; fails the job and aborts `ctx.signal` |
 | `maxRate` | `{ count, windowMs }` | , | Sliding-window rate limit |
 | `aging` | `{ boostPerMinute, maxBoost }` | , | Priority aging config |
 | `retryIf` | `(err, job) => boolean` | , | Return `false` to skip retry |
@@ -136,20 +138,28 @@ queue.add('report:generate', { type: 'combined' }, {
 
 ## Multi-Process Lease Safety
 
-Two workers against the same DB file cannot claim the same job. `pollAndClaim` atomically sets `claimed_until`. If a worker crashes mid-job, any other worker reclaims after lease expiry.
+Two workers against the same DB file cannot claim the same job. `pollAndClaim` atomically sets `claimed_until` and a fresh `claimId`. While the handler runs, the worker renews the lease every `heartbeatMs` (default `leaseMs / 4`), so a live job keeps its claim however long it runs; if the worker's process dies, the lease lapses and another worker reclaims the job within `leaseMs`. A short lease therefore means fast crash recovery without risking double execution.
 
 ```typescript
-// Default lease: 5 minutes. Override per worker:
 queue.createWorker({
   type: 'server:provision',
   handler: async (job, ctx) => {
-    await longStep()
-    ctx.renewLease()   // extend before expiry
-    await anotherStep()
+    await longStep(ctx.signal)   // pass the signal to anything cancellable
+    await anotherStep(ctx.signal)
   },
-  leaseMs: 600_000    // 10 min
+  leaseMs: 60_000   // reclaim within 60s of a crash; heartbeat every 15s
 })
 ```
+
+**Fencing.** If a worker stalls past its lease (event-loop block, network partition) and another worker reclaims the job, the first worker's `markJobDone`/`markJobFailed`/`markJobDead`/`renewLease` calls carry its old `claimId` and are rejected: nothing is written, `ctx.signal` is aborted, and `job:leaseLost` is emitted. `ctx.renewLease()` returns `false` in that state.
+
+**Timeouts.** When `timeoutMs` elapses the job is failed (and retried per its retry policy) and `ctx.signal` is aborted. The library cannot stop a handler that ignores the signal, so a timed-out handler that doesn't honor `ctx.signal` keeps running alongside its retry.
+
+**Handlers must be idempotent.** A job whose process crashes, or that times out or throws, is retried from the start. Patterns that make that safe:
+
+- External sends: derive an idempotency key from `job.id` (plus recipient, etc.) and pass it to the provider (e.g. Resend's `idempotencyKey`).
+- External resources: check-before-create (look up by name or stored id) instead of creating unconditionally.
+- Multi-step work: persist per-step completion and skip finished steps on rerun.
 
 Write APIs (`add`, `addToBatch`, `cancelBatch`, `retryFailedJob`, `retryFailedJobsByType`, and the internal `markJobDone`/`markJobFailed`/`markJobDead`) are each wrapped in a single immediate (`BEGIN IMMEDIATE`) transaction, so concurrent processes writing to the same DB file don't race on read-then-write. Cross-process write contention still serializes on SQLite's single writer; `busy_timeout` (10s, `schema.ts`) is the ceiling on how long a write waits before failing. At very high write concurrency across many processes, that ceiling is the next thing to watch - sharding into multiple DB files (e.g. per tenant) is the escape hatch if 10s waits start queuing visibly.
 

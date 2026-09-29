@@ -75,16 +75,21 @@ describe('JobWorker', () => {
       type: 'test:work',
       handler: async (_job, ctx) => {
         receivedSignal = ctx.signal;
+        // Still running when stop() is called - its signal must abort
+        await new Promise<void>(resolve =>
+          ctx.signal.addEventListener('abort', () => resolve())
+        );
       },
       pollIntervalMs: 10
     });
 
     worker.start();
     await sleep(50);
+    expect(receivedSignal!.aborted).toBe(false);
     await worker.stop();
 
     expect(receivedSignal).not.toBeNull();
-    expect(receivedSignal!.aborted).toBe(true); // aborted after stop
+    expect(receivedSignal!.aborted).toBe(true); // aborted by stop
   });
 
   test('retries on handler error', async () => {

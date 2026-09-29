@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   unique_key TEXT,
   backoff_config TEXT,
   claimed_until TEXT,
+  claim_id TEXT,
   result TEXT,
   expire_at TEXT,
   webhook_config TEXT
@@ -174,6 +175,9 @@ export function initializeSchema(db: Database): void {
   }
   if (!cols.some(c => c.name === 'claimed_until')) {
     db.run('ALTER TABLE jobs ADD COLUMN claimed_until TEXT');
+  }
+  if (!cols.some(c => c.name === 'claim_id')) {
+    db.run('ALTER TABLE jobs ADD COLUMN claim_id TEXT');
   }
   if (!cols.some(c => c.name === 'result')) {
     db.run('ALTER TABLE jobs ADD COLUMN result TEXT');

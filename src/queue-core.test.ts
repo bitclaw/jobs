@@ -229,7 +229,9 @@ describe('JobQueue', () => {
       const claimed = queue.pollAndClaim('email:send');
       expect(claimed).not.toBeNull();
       expect(claimed!.id).toBe(highId);
-      expect(claimed!.status).toBe('pending');
+      // Returned job reflects the claim itself (status + fencing token)
+      expect(claimed!.status).toBe('processing');
+      expect(claimed!.claimId).toBeString();
 
       // After claiming, getJob shows processing
       const updated = queue.getJob(highId)!;

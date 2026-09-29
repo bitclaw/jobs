@@ -44,6 +44,8 @@ export type Job<T = unknown> = {
   readonly responseLog: string | null;
   readonly uniqueKey: string | null;
   readonly claimedUntil: string | null;
+  /** Fencing token for the current claim; a new one is issued on every claim. */
+  readonly claimId: string | null;
   readonly result: unknown | null;
   readonly expireAt: string | null;
 };
@@ -96,7 +98,12 @@ export type AddJobOptions = {
 export type JobContext = {
   reportProgress: (percent: number) => void;
   signal: AbortSignal;
-  renewLease(): void;
+  /**
+   * Extends this job's lease. Returns false if the lease was already lost
+   * (another worker reclaimed the job). The worker renews automatically
+   * every `heartbeatMs`; handlers rarely need to call this themselves.
+   */
+  renewLease(): boolean;
 };
 
 export type RateLimit = {
@@ -124,11 +131,25 @@ export type WorkerOptions<T = unknown> = {
   pollIntervalMs?: number;
   maxRate?: RateLimit;
   onError?: (job: Job<T>, error: unknown) => void;
-  /** Hard wall-clock limit per job execution in ms. Job is marked failed on timeout. */
+  /**
+   * Hard wall-clock limit per job execution in ms. On timeout the job is
+   * marked failed and `ctx.signal` is aborted - handlers must honor the
+   * signal, otherwise the timed-out run keeps going alongside its retry.
+   */
   timeoutMs?: number;
   /** Max concurrent jobs this worker runs simultaneously. Default: 1. */
   concurrency?: number;
+  /**
+   * Lease length in ms. A 'processing' job whose lease expires is
+   * reclaimable by any worker. Default: 300_000.
+   */
   leaseMs?: number;
+  /**
+   * How often the worker renews a running job's lease, in ms. Default:
+   * leaseMs / 4. Set to 0 to disable (the handler must then call
+   * ctx.renewLease() itself or finish within leaseMs).
+   */
+  heartbeatMs?: number;
   retryIf?: (error: unknown, job: Job<T>) => boolean;
   aging?: { boostPerMinute: number; maxBoost: number };
 };
@@ -184,6 +205,7 @@ export type JobRow = {
   unique_key: string | null;
   backoff_config: string | null;
   claimed_until: string | null;
+  claim_id: string | null;
   result: string | null;
   expire_at: string | null;
   webhook_config: string | null;
