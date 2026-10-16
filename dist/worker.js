@@ -115,15 +115,51 @@ export class JobWorker {
         this.scheduleNext();
     }
     async runJob(job) {
+        const leaseMs = this.options.leaseMs ?? 300_000;
+        const heartbeatMs = this.options.heartbeatMs ?? Math.floor(leaseMs / 4);
+        const claimId = job.claimId ?? undefined;
+        // Per-job signal: aborted on worker stop, on timeout, and when the lease
+        // is lost to another worker - so a handler that honors ctx.signal stops
+        // instead of running on alongside the job's retry.
+        const jobAbort = new AbortController();
+        const workerSignal = this.abortController?.signal;
+        const onWorkerAbort = () => jobAbort.abort(workerSignal?.reason);
+        if (workerSignal?.aborted)
+            jobAbort.abort(workerSignal.reason);
+        else
+            workerSignal?.addEventListener('abort', onWorkerAbort, { once: true });
+        let leaseLost = false;
+        const renewLease = () => {
+            const held = this.queue.renewLease(job.id, leaseMs, claimId);
+            if (!held && !leaseLost) {
+                leaseLost = true;
+                jobAbort.abort(new Error('Job lease lost'));
+            }
+            return held;
+        };
+        // Built-in heartbeat: without it, any handler running past leaseMs was
+        // reclaimed by pollAndClaim while still alive and executed twice.
+        const heartbeat = heartbeatMs > 0
+            ? setInterval(() => {
+                try {
+                    renewLease();
+                }
+                catch {
+                    // transient write failure (e.g. SQLITE_BUSY) - next tick retries
+                }
+            }, heartbeatMs)
+            : null;
+        let timeoutTimer = null;
+        const reportLeaseLost = () => {
+            this.queue.emit('job:leaseLost', job);
+        };
         try {
             const ctx = {
                 reportProgress: (percent) => {
                     this.queue.updateProgress(job.id, percent);
                 },
-                renewLease: () => {
-                    this.queue.renewLease(job.id, this.options.leaseMs ?? 300_000);
-                },
-                signal: this.abortController.signal
+                renewLease,
+                signal: jobAbort.signal
             };
             const handler = this.options.handler;
             const middlewares = this.queue.middlewares;
@@ -143,14 +179,22 @@ export class JobWorker {
                 const timeoutMs = this.options.timeoutMs;
                 handlerResult = await Promise.race([
                     execute(),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error(`Job timed out after ${timeoutMs}ms`)), timeoutMs))
+                    new Promise((_, reject) => {
+                        timeoutTimer = setTimeout(() => {
+                            const error = new Error(`Job timed out after ${timeoutMs}ms`);
+                            jobAbort.abort(error);
+                            reject(error);
+                        }, timeoutMs);
+                    })
                 ]);
             }
             else {
                 handlerResult = await execute();
             }
             try {
-                this.queue.markJobDone(job.id, handlerResult);
+                if (!this.queue.markJobDone(job.id, handlerResult, claimId)) {
+                    reportLeaseLost();
+                }
             }
             catch (markError) {
                 // Handler already succeeded - don't let a write failure here (e.g.
@@ -171,12 +215,11 @@ export class JobWorker {
                 ? this.options.retryIf(error, job)
                 : true;
             try {
-                if (isNonRetryable || !shouldRetry) {
-                    this.queue.markJobDead(job.id, message);
-                }
-                else {
-                    this.queue.markJobFailed(job.id, message);
-                }
+                const held = isNonRetryable || !shouldRetry
+                    ? this.queue.markJobDead(job.id, message, claimId)
+                    : this.queue.markJobFailed(job.id, message, claimId);
+                if (!held)
+                    reportLeaseLost();
             }
             catch (markError) {
                 this.queue.emit('job:markFailedError', job, markError);
@@ -184,6 +227,11 @@ export class JobWorker {
             this.options.onError?.(job, error);
         }
         finally {
+            if (heartbeat)
+                clearInterval(heartbeat);
+            if (timeoutTimer)
+                clearTimeout(timeoutTimer);
+            workerSignal?.removeEventListener('abort', onWorkerAbort);
             this.activeCount--;
             if (!this.running && this.activeCount === 0 && this.stopResolve) {
                 this.stopResolve();

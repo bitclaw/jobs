@@ -25,10 +25,18 @@ export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> ext
     purgeFailedJobs(olderThanMs: number): number;
     purge(options: PurgeOptions): number;
     pollAndClaim(type: string, leaseMs?: number): Job | null;
-    renewLease(id: number, leaseMs: number): void;
-    markJobDone(id: number, result?: unknown): void;
-    markJobDead(id: number, error: string): void;
-    markJobFailed(id: number, error: string): void;
+    /**
+     * Extends a processing job's lease. With `claimId`, only the current
+     * claim holder can renew; returns false when the lease was lost.
+     */
+    renewLease(id: number, leaseMs: number, claimId?: string): boolean;
+    private holdsClaim;
+    /** Returns false (and changes nothing) if `claimId` no longer holds the job. */
+    markJobDone(id: number, result?: unknown, claimId?: string): boolean;
+    /** Returns false (and changes nothing) if `claimId` no longer holds the job. */
+    markJobDead(id: number, error: string, claimId?: string): boolean;
+    /** Returns false (and changes nothing) if `claimId` no longer holds the job. */
+    markJobFailed(id: number, error: string, claimId?: string): boolean;
     private fib;
     updateProgress(id: number, progress: number): void;
     createBatch(name: string, options?: BatchOptions): string;

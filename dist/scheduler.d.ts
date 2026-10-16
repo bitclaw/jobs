@@ -20,6 +20,7 @@ export declare class Scheduler<TMap extends JobMap = Record<string, unknown>> {
     getSchedule(name: string): Schedule | null;
     removeSchedule(name: string): boolean;
     tick(): number;
+    private runDue;
     start(intervalMs?: number): void;
     stop(): void;
 }
