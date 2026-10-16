@@ -68,10 +68,13 @@ export class Scheduler<TMap extends JobMap = Record<string, unknown>> {
       SELECT * FROM schedules
       WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= $now
     `);
+    // Compare-and-swap on the next_run_at this ticker read: if another
+    // ticker (a second cron line, a second process) already advanced it,
+    // this changes 0 rows and the caller must not enqueue.
     this.updateLastRunStmt = db.query(`
       UPDATE schedules
       SET last_run_at = $now, next_run_at = $nextRunAt, updated_at = $now
-      WHERE id = $id
+      WHERE id = $id AND enabled = 1 AND next_run_at = $prevNextRunAt
     `);
     this.pauseStmt = db.query(`
       UPDATE schedules SET enabled = 0, updated_at = $now WHERE name = $name
@@ -156,58 +159,58 @@ export class Scheduler<TMap extends JobMap = Record<string, unknown>> {
     const now = nowISO();
     const dueSchedules = this.selectDueStmt.all({ $now: now }) as ScheduleRow[];
     let enqueued = 0;
-
     for (const row of dueSchedules) {
-      // Overlap check: if overlap=false, skip if there's a pending/processing job of this type
-      if (row.overlap === 0) {
-        const active = this.queue.db
-          .query(
-            "SELECT 1 FROM jobs WHERE type = $type AND status IN ('pending', 'processing') LIMIT 1"
-          )
-          .get({ $type: row.type });
-
-        if (active) {
-          // Skip this tick, recalculate next_run_at
-          const parsed = parseCron(row.cron);
-          const nextRunAt = nextCronOccurrence(
-            parsed,
-            new Date()
-          ).toISOString();
-          this.updateLastRunStmt.run({
-            $id: row.id,
-            $now: now,
-            $nextRunAt: nextRunAt
-          });
-          continue;
-        }
-      }
-
-      // Enqueue the job
-      this.queue.db
-        .query(
-          `INSERT INTO jobs (type, data, status, priority, max_retries, run_at, batch_id)
-           VALUES ($type, $data, 'pending', 0, $maxRetries, $now, NULL)`
-        )
-        .run({
-          $type: row.type,
-          $data: row.data,
-          $maxRetries: row.max_retries,
-          $now: now
-        });
-
-      // Update schedule timestamps
-      const parsed = parseCron(row.cron);
-      const nextRunAt = nextCronOccurrence(parsed, new Date()).toISOString();
-      this.updateLastRunStmt.run({
-        $id: row.id,
-        $now: now,
-        $nextRunAt: nextRunAt
-      });
-
-      enqueued++;
+      if (this.runDue(row, now)) enqueued++;
     }
-
     return enqueued;
+  }
+
+  // Claims one due schedule and enqueues its job, atomically. The claim
+  // (advancing next_run_at from the value read) and the insert share an
+  // IMMEDIATE transaction, so two tickers racing on the same schedule can
+  // never both enqueue: the loser's claim changes 0 rows. Returns true when
+  // a job was enqueued.
+  private runDue(row: ScheduleRow, now: string): boolean {
+    const nextRunAt = nextCronOccurrence(
+      parseCron(row.cron),
+      new Date()
+    ).toISOString();
+
+    return this.queue.db
+      .transaction(() => {
+        const claimed = this.updateLastRunStmt.run({
+          $id: row.id,
+          $now: now,
+          $nextRunAt: nextRunAt,
+          $prevNextRunAt: row.next_run_at
+        });
+        if (claimed.changes === 0) return false;
+
+        // Overlap check: if overlap=false, skip this occurrence while a job of
+        // this type is pending/processing (the claim above still advances it).
+        if (row.overlap === 0) {
+          const active = this.queue.db
+            .query(
+              "SELECT 1 FROM jobs WHERE type = $type AND status IN ('pending', 'processing') LIMIT 1"
+            )
+            .get({ $type: row.type });
+          if (active) return false;
+        }
+
+        this.queue.db
+          .query(
+            `INSERT INTO jobs (type, data, status, priority, max_retries, run_at, batch_id)
+           VALUES ($type, $data, 'pending', 0, $maxRetries, $now, NULL)`
+          )
+          .run({
+            $type: row.type,
+            $data: row.data,
+            $maxRetries: row.max_retries,
+            $now: now
+          });
+        return true;
+      })
+      .immediate();
   }
 
   start(intervalMs = 60_000): void {
