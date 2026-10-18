@@ -62,9 +62,9 @@
     "knip": "knip",
     "prepublishOnly": "npm run build && npm test",
     "publish:dev": "npm run build && npm publish --tag dev --access public",
-    "publish:patch": "npm whoami && npm version patch && git push --follow-tags && npm publish --access public",
-    "publish:minor": "npm whoami && npm version minor && git push --follow-tags && npm publish --access public",
-    "publish:major": "npm whoami && npm version major && git push --follow-tags && npm publish --access public"
+    "publish:patch": "npm version patch && git push --follow-tags",
+    "publish:minor": "npm version minor && git push --follow-tags",
+    "publish:major": "npm version major && git push --follow-tags"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.0",
