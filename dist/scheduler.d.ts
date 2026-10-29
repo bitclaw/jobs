@@ -3,6 +3,7 @@ import type { AddScheduleOptions, JobMap, Schedule } from './types';
 export declare class Scheduler<TMap extends JobMap = Record<string, unknown>> {
     private readonly queue;
     private timer;
+    private readonly shouldRunByName;
     private readonly upsertStmt;
     private readonly selectByNameStmt;
     private readonly selectAllStmt;

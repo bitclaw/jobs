@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { JobQueueEmitter } from './events';
-import type { AddJobOptions, BatchOptions, FailedJob, Job, JobBatch, JobGraphNode, JobMap, JobStats, ListJobsOptions, MiddlewareFn, PaginatedResult, PurgeOptions, WorkerOptions } from './types';
+import type { AddJobOptions, BatchOptions, FailedJob, GetStatsOptions, Job, JobBatch, JobGraphNode, JobMap, JobStats, ListJobsOptions, MiddlewareFn, PaginatedResult, PurgeOptions, WorkerOptions } from './types';
 import { JobWorker } from './worker';
 export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> extends JobQueueEmitter {
     readonly db: Database;
@@ -10,7 +10,7 @@ export declare class JobQueue<TMap extends JobMap = Record<string, unknown>> ext
     constructor(dbPath: string);
     add<K extends string & keyof TMap>(type: K, data: TMap[K], options?: AddJobOptions): number;
     getJob(id: number): Job | null;
-    getStats(): JobStats;
+    getStats(options?: GetStatsOptions): JobStats;
     getFailedJobs(options?: {
         type?: string;
         limit?: number;

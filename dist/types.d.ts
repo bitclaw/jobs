@@ -146,8 +146,26 @@ export type PurgeOptions = {
 export type ListJobsOptions = {
     status?: JobStatus;
     type?: string;
+    /**
+     * Types to exclude from the list (and its total). Combined with
+     * `keepStatuses` for callers that want to hide a type's routine rows
+     * (e.g. done heartbeat jobs) while still surfacing the same type's
+     * failures: a job is excluded only when its type is in this list AND its
+     * status is not in `keepStatuses`.
+     */
+    excludeTypes?: string[];
+    /** Statuses that survive `excludeTypes` (e.g. ['failed']). */
+    keepStatuses?: JobStatus[];
     limit?: number;
     offset?: number;
+};
+export type GetStatsOptions = {
+    /**
+     * Types to exclude from every count, including the dead-letter
+     * (`failed_jobs`) count. Use with the unfiltered getStats() call to
+     * derive a "scheduled vs real work" split.
+     */
+    excludeTypes?: string[];
 };
 export type PaginatedResult<T> = {
     items: T[];
@@ -262,6 +280,17 @@ export type AddScheduleOptions = {
     timezone?: string;
     overlap?: boolean;
     maxRetries?: number;
+    /**
+     * Cheap, synchronous go/no-go check run by tick() before this schedule's
+     * due occurrence is claimed. Return false to skip the occurrence without
+     * enqueueing and without advancing next_run_at, so the same occurrence is
+     * re-checked on the next tick. In-process only: the function cannot be
+     * persisted, so every Scheduler instance that ticks must re-register the
+     * schedule with the same option (runmist's ticker and schedule-run.ts
+     * both register before ticking). A predicate that throws fails open:
+     * the occurrence is enqueued and the error is logged.
+     */
+    shouldRun?: () => boolean;
 };
 export type WorkflowExecutionStatus = 'running' | 'completed' | 'compensating' | 'failed';
 export type WorkflowExecution = {

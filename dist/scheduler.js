@@ -22,6 +22,10 @@ function toSchedule(row) {
 export class Scheduler {
     queue;
     timer = null;
+    // shouldRun predicates are functions and cannot live in the schedules
+    // table; they are kept per instance and must be re-registered by every
+    // process that ticks. Keyed by schedule name.
+    shouldRunByName = new Map();
     upsertStmt;
     selectByNameStmt;
     selectAllStmt;
@@ -72,6 +76,12 @@ export class Scheduler {
         const parsed = parseCron(cron);
         const nextRunAt = nextCronOccurrence(parsed, new Date()).toISOString();
         const now = nowISO();
+        if (options?.shouldRun) {
+            this.shouldRunByName.set(name, options.shouldRun);
+        }
+        else {
+            this.shouldRunByName.delete(name);
+        }
         this.upsertStmt.run({
             $name: name,
             $type: type,
@@ -137,6 +147,18 @@ export class Scheduler {
     // never both enqueue: the loser's claim changes 0 rows. Returns true when
     // a job was enqueued.
     runDue(row, now) {
+        const shouldRun = this.shouldRunByName.get(row.name);
+        if (shouldRun) {
+            // Fail open: a throwing predicate must never silently disable a
+            // schedule, so the occurrence is enqueued as if no predicate existed.
+            try {
+                if (!shouldRun())
+                    return false;
+            }
+            catch (error) {
+                console.error(`[jobs] shouldRun for schedule "${row.name}" threw:`, error instanceof Error ? error.message : String(error));
+            }
+        }
         const nextRunAt = nextCronOccurrence(parseCron(row.cron), new Date()).toISOString();
         return this.queue.db
             .transaction(() => {

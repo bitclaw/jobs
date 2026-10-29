@@ -106,9 +106,28 @@ export class JobQueue extends JobQueueEmitter {
         const row = this.stmts.selectJob.get({ $id: id });
         return row ? toJob(row) : null;
     }
-    getStats() {
-        const rows = this.stmts.selectStats.all();
-        const deadRow = this.stmts.countFailed.get();
+    getStats(options) {
+        const excludeTypes = options?.excludeTypes;
+        const excludes = excludeTypes && excludeTypes.length > 0;
+        let rows;
+        let deadRow;
+        if (excludes) {
+            const placeholders = excludeTypes.map((_, i) => `$ex${i}`);
+            const params = {};
+            for (const [i, t] of excludeTypes.entries()) {
+                params[`$ex${i}`] = t;
+            }
+            rows = this.db
+                .query(`SELECT status, COUNT(*) as count FROM jobs WHERE type NOT IN (${placeholders.join(', ')}) GROUP BY status`)
+                .all(params);
+            deadRow = this.db
+                .query(`SELECT COUNT(*) as count FROM failed_jobs WHERE type NOT IN (${placeholders.join(', ')})`)
+                .get(params);
+        }
+        else {
+            rows = this.stmts.selectStats.all();
+            deadRow = this.stmts.countFailed.get();
+        }
         const stats = {
             pending: 0,
             blocked: 0,
@@ -163,6 +182,23 @@ export class JobQueue extends JobQueueEmitter {
         if (options?.type) {
             conditions.push('type = $type');
             filterParams.$type = options.type;
+        }
+        if (options?.excludeTypes && options.excludeTypes.length > 0) {
+            const typePlaceholders = options.excludeTypes.map((_, i) => `$ex${i}`);
+            const keepStatuses = options.keepStatuses ?? [];
+            if (keepStatuses.length > 0) {
+                const statusPlaceholders = keepStatuses.map((_, i) => `$ks${i}`);
+                conditions.push(`(type NOT IN (${typePlaceholders.join(', ')}) OR status IN (${statusPlaceholders.join(', ')}))`);
+                for (const [i, s] of keepStatuses.entries()) {
+                    filterParams[`$ks${i}`] = s;
+                }
+            }
+            else {
+                conditions.push(`type NOT IN (${typePlaceholders.join(', ')})`);
+            }
+            for (const [i, t] of options.excludeTypes.entries()) {
+                filterParams[`$ex${i}`] = t;
+            }
         }
         const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
         const rows = this.db
