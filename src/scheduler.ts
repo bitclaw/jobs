@@ -32,6 +32,10 @@ function toSchedule(row: ScheduleRow): Schedule {
 export class Scheduler<TMap extends JobMap = Record<string, unknown>> {
   private readonly queue: JobQueue<TMap>;
   private timer: ReturnType<typeof setInterval> | null = null;
+  // shouldRun predicates are functions and cannot live in the schedules
+  // table; they are kept per instance and must be re-registered by every
+  // process that ticks. Keyed by schedule name.
+  private readonly shouldRunByName = new Map<string, () => boolean>();
 
   private readonly upsertStmt;
   private readonly selectByNameStmt;
@@ -94,6 +98,12 @@ export class Scheduler<TMap extends JobMap = Record<string, unknown>> {
     const parsed = parseCron(cron);
     const nextRunAt = nextCronOccurrence(parsed, new Date()).toISOString();
     const now = nowISO();
+
+    if (options?.shouldRun) {
+      this.shouldRunByName.set(name, options.shouldRun);
+    } else {
+      this.shouldRunByName.delete(name);
+    }
 
     this.upsertStmt.run({
       $name: name,
@@ -171,6 +181,20 @@ export class Scheduler<TMap extends JobMap = Record<string, unknown>> {
   // never both enqueue: the loser's claim changes 0 rows. Returns true when
   // a job was enqueued.
   private runDue(row: ScheduleRow, now: string): boolean {
+    const shouldRun = this.shouldRunByName.get(row.name);
+    if (shouldRun) {
+      // Fail open: a throwing predicate must never silently disable a
+      // schedule, so the occurrence is enqueued as if no predicate existed.
+      try {
+        if (!shouldRun()) return false;
+      } catch (error: unknown) {
+        console.error(
+          `[jobs] shouldRun for schedule "${row.name}" threw:`,
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    }
+
     const nextRunAt = nextCronOccurrence(
       parseCron(row.cron),
       new Date()

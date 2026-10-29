@@ -13,6 +13,7 @@ import type {
   BatchOptions,
   FailedJob,
   FailedJobRow,
+  GetStatsOptions,
   Job,
   JobBatch,
   JobBatchRow,
@@ -141,9 +142,32 @@ export class JobQueue<
     return row ? toJob(row) : null;
   }
 
-  getStats(): JobStats {
-    const rows = this.stmts.selectStats.all() as StatsRow[];
-    const deadRow = this.stmts.countFailed.get() as { count: number };
+  getStats(options?: GetStatsOptions): JobStats {
+    const excludeTypes = options?.excludeTypes;
+    const excludes = excludeTypes && excludeTypes.length > 0;
+
+    let rows: StatsRow[];
+    let deadRow: { count: number };
+    if (excludes) {
+      const placeholders = excludeTypes.map((_, i) => `$ex${i}`);
+      const params: Record<string, string> = {};
+      for (const [i, t] of excludeTypes.entries()) {
+        params[`$ex${i}`] = t;
+      }
+      rows = this.db
+        .query(
+          `SELECT status, COUNT(*) as count FROM jobs WHERE type NOT IN (${placeholders.join(', ')}) GROUP BY status`
+        )
+        .all(params) as StatsRow[];
+      deadRow = this.db
+        .query(
+          `SELECT COUNT(*) as count FROM failed_jobs WHERE type NOT IN (${placeholders.join(', ')})`
+        )
+        .get(params) as { count: number };
+    } else {
+      rows = this.stmts.selectStats.all() as StatsRow[];
+      deadRow = this.stmts.countFailed.get() as { count: number };
+    }
 
     const stats: JobStats = {
       pending: 0,
@@ -217,6 +241,24 @@ export class JobQueue<
     if (options?.type) {
       conditions.push('type = $type');
       filterParams.$type = options.type;
+    }
+    if (options?.excludeTypes && options.excludeTypes.length > 0) {
+      const typePlaceholders = options.excludeTypes.map((_, i) => `$ex${i}`);
+      const keepStatuses = options.keepStatuses ?? [];
+      if (keepStatuses.length > 0) {
+        const statusPlaceholders = keepStatuses.map((_, i) => `$ks${i}`);
+        conditions.push(
+          `(type NOT IN (${typePlaceholders.join(', ')}) OR status IN (${statusPlaceholders.join(', ')}))`
+        );
+        for (const [i, s] of keepStatuses.entries()) {
+          filterParams[`$ks${i}`] = s;
+        }
+      } else {
+        conditions.push(`type NOT IN (${typePlaceholders.join(', ')})`);
+      }
+      for (const [i, t] of options.excludeTypes.entries()) {
+        filterParams[`$ex${i}`] = t;
+      }
     }
 
     const where =

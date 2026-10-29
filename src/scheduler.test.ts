@@ -253,6 +253,42 @@ describe('Scheduler', () => {
       );
     });
 
+    test('shouldRun false skips the occurrence without advancing next_run_at', () => {
+      let shouldRun = false;
+      scheduler.register('cleanup', 'data:cleanup', '* * * * *', {
+        shouldRun: () => shouldRun
+      });
+
+      queue.db
+        .query("UPDATE schedules SET next_run_at = '2020-01-01T00:00:00.000Z'")
+        .run();
+
+      expect(scheduler.tick()).toBe(0);
+      expect(queue.pollAndClaim('data:cleanup')).toBeNull();
+      // Occurrence not consumed: still due, so a later tick re-checks it.
+      const due = scheduler.getSchedule('cleanup')!;
+      expect(new Date(due.nextRunAt!).getTime()).toBeLessThan(Date.now());
+
+      shouldRun = true;
+      expect(scheduler.tick()).toBe(1);
+      expect(queue.pollAndClaim('data:cleanup')).not.toBeNull();
+    });
+
+    test('shouldRun throwing fails open and enqueues the occurrence', () => {
+      scheduler.register('cleanup', 'data:cleanup', '* * * * *', {
+        shouldRun: () => {
+          throw new Error('predicate blew up');
+        }
+      });
+
+      queue.db
+        .query("UPDATE schedules SET next_run_at = '2020-01-01T00:00:00.000Z'")
+        .run();
+
+      expect(scheduler.tick()).toBe(1);
+      expect(queue.pollAndClaim('data:cleanup')).not.toBeNull();
+    });
+
     test('enqueues multiple due schedules', () => {
       scheduler.register('a', 'data:cleanup', '* * * * *');
       scheduler.register('b', 'email:digest', '* * * * *');

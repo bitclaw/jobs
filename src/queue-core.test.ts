@@ -211,6 +211,39 @@ describe('JobQueue', () => {
       expect(stats.blocked).toBe(0);
       expect(stats.dead).toBe(0);
     });
+
+    test('excludeTypes removes excluded types from every count including dead', () => {
+      queue.add('email:send', { to: 'a@b.com', subject: 'a' });
+      queue.add('deploy:provision', { serverId: 'srv-1' });
+      queue.db
+        .query(
+          "INSERT INTO jobs (type, data, status) VALUES ('heartbeat:ping', '{}', 'done')"
+        )
+        .run();
+      queue.db
+        .query(
+          "INSERT INTO jobs (type, data, status) VALUES ('heartbeat:ping', '{}', 'failed')"
+        )
+        .run();
+      queue.db
+        .query(
+          `INSERT INTO failed_jobs
+             (original_job_id, type, data, error, retry_count, max_retries, created_at, failed_at)
+           VALUES (999, 'heartbeat:ping', '{}', 'dead', 3, 3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`
+        )
+        .run();
+
+      const real = queue.getStats({ excludeTypes: ['heartbeat:ping'] });
+      expect(real.pending).toBe(2);
+      expect(real.done).toBe(0);
+      expect(real.failed).toBe(0);
+      expect(real.dead).toBe(0);
+
+      const all = queue.getStats();
+      expect(all.done).toBe(1);
+      expect(all.failed).toBe(1);
+      expect(all.dead).toBe(1);
+    });
   });
 
   describe('pollAndClaim', () => {

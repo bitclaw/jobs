@@ -80,6 +80,60 @@ describe('JobQueue', () => {
       expect(page2.items).toHaveLength(1);
       expect(page2.total).toBe(3);
     });
+
+    test('excludeTypes hides rows of excluded types and total matches the list', () => {
+      queue.add('email:send', { to: 'a@b.com', subject: 'a' });
+      queue.add('deploy:provision', { serverId: 'srv-1' });
+      queue.db
+        .query(
+          "INSERT INTO jobs (type, data, status) VALUES ('heartbeat:ping', '{}', 'done')"
+        )
+        .run();
+
+      const result = queue.listJobs({ excludeTypes: ['heartbeat:ping'] });
+      expect(result.total).toBe(2);
+      expect(result.items).toHaveLength(2);
+      expect(result.items.every(j => j.type !== 'heartbeat:ping')).toBe(true);
+    });
+
+    test('keepStatuses keeps failed rows of excluded types, done stays hidden', () => {
+      queue.add('email:send', { to: 'a@b.com', subject: 'a' });
+      queue.db
+        .query(
+          "INSERT INTO jobs (type, data, status) VALUES ('heartbeat:ping', '{}', 'done')"
+        )
+        .run();
+      queue.db
+        .query(
+          "INSERT INTO jobs (type, data, status) VALUES ('heartbeat:ping', '{}', 'failed')"
+        )
+        .run();
+
+      const result = queue.listJobs({
+        excludeTypes: ['heartbeat:ping'],
+        keepStatuses: ['failed']
+      });
+      expect(result.total).toBe(2);
+      const visible = result.items.map(j => `${j.type}:${j.status}`);
+      expect(visible).toContain('heartbeat:ping:failed');
+      expect(visible).not.toContain('heartbeat:ping:done');
+    });
+
+    test('excludeTypes combines with the type filter', () => {
+      queue.add('email:send', { to: 'a@b.com', subject: 'a' });
+      queue.db
+        .query(
+          "INSERT INTO jobs (type, data, status) VALUES ('heartbeat:ping', '{}', 'done')"
+        )
+        .run();
+
+      const result = queue.listJobs({
+        type: 'email:send',
+        excludeTypes: ['heartbeat:ping']
+      });
+      expect(result.total).toBe(1);
+      expect(result.items).toHaveLength(1);
+    });
   });
 
   describe('cancelJob', () => {
