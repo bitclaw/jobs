@@ -2,6 +2,9 @@
 
 SQLite-backed background job queue for Bun. Typed generics, multi-process lease safety, priority aging, middleware pipeline, workflow engine with saga compensation, and zero runtime dependencies.
 
+> Part of [Warpkit](https://warpkit.dev/?utm_source=github&utm_medium=readme), my TypeScript SaaS starter.
+> I'm open for consulting on this kind of work: [bitclaw.com/hire](https://bitclaw.com/hire?utm_source=github&utm_medium=readme).
+
 ## Installation
 
 ```bash
