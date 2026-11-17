@@ -63,6 +63,8 @@ export class JobWorker {
     scheduleNext() {
         if (!this.running)
             return;
+        if (this.timer)
+            clearTimeout(this.timer);
         const interval = this.options.pollIntervalMs ?? 1000;
         // Jitter desynchronizes concurrent worker processes so their poll ticks
         // don't bunch up and contend for the write lock in lockstep.
@@ -236,6 +238,16 @@ export class JobWorker {
             if (!this.running && this.activeCount === 0 && this.stopResolve) {
                 this.stopResolve();
                 this.stopResolve = null;
+            }
+            // A slot just freed and the queue had work a moment ago: look again
+            // now rather than a poll interval later. Waiting capped a worker at
+            // `concurrency` jobs per interval however deep its backlog (one
+            // email every 5 s under a signup wave). An empty poll goes back to
+            // the interval.
+            if (this.running && !this.paused) {
+                if (this.timer)
+                    clearTimeout(this.timer);
+                this.timer = setTimeout(() => void this.poll(), 0);
             }
         }
     }
