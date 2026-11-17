@@ -47,6 +47,41 @@ describe('JobWorker', () => {
     expect(job.progress).toBe(100);
   });
 
+  // Regression: a worker waited a full poll interval after each job, so at
+  // concurrency 1 and a 5 s interval it ran one job every 5 s however many
+  // were waiting (a signup wave queued 400 welcome emails, about 30 min).
+  test('works through a backlog without waiting an interval per job', async () => {
+    for (let i = 0; i < 20; i++) queue.add('test:work', { value: String(i) });
+    let done = 0;
+    const worker = queue.createWorker({
+      type: 'test:work',
+      handler: async () => {
+        done++;
+      },
+      pollIntervalMs: 300
+    });
+    worker.start();
+    // The first poll is an interval after start; then no more waiting.
+    await sleep(900);
+    await worker.stop();
+    expect(done).toBe(20);
+  });
+
+  test('an idle worker still polls at its interval, not in a loop', async () => {
+    const spy = vi.spyOn(queue, 'pollAndClaim');
+    const worker = queue.createWorker({
+      type: 'test:work',
+      handler: async () => {},
+      pollIntervalMs: 100
+    });
+    queue.add('test:work', { value: 'one' });
+    worker.start();
+    await sleep(550);
+    await worker.stop();
+    // One claim, one empty look after it, then about one per interval.
+    expect(spy.mock.calls.length).toBeLessThan(10);
+  });
+
   test('provides JobContext with progress reporting', async () => {
     const id = queue.add('test:work', { value: 'progress' });
     const worker = queue.createWorker({
